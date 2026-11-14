@@ -31,6 +31,13 @@ export const BeneficiaryModal: React.FC<BeneficiaryModalProps> = ({ isOpen, onCl
   const [upiError, setUpiError] = useState<string>('');
 
   useEffect(() => {
+    if (isOpen) {
+      setHolderName(currentUser.name);
+      setUpiHolderName(currentUser.name);
+    }
+  }, [isOpen, currentUser.id, currentUser.name]);
+
+  useEffect(() => {
     const cleanIfsc = ifscCode.trim().toUpperCase();
     if (cleanIfsc.length === 11) {
       setIsLookingUp(true);

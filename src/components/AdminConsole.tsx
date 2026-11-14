@@ -100,6 +100,22 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
   });
   const [feeSaveSuccess, setFeeSaveSuccess] = useState(false);
 
+  React.useEffect(() => {
+    if (users.length > 0 && (!selectedUserId || !users.some((u) => u.id === selectedUserId))) {
+      setSelectedUserId(users[0].id);
+    }
+  }, [users, selectedUserId]);
+
+  React.useEffect(() => {
+    setFeeForm({
+      flatFee: feeConfig.flatFee,
+      percentageFee: feeConfig.percentageFee,
+      minWithdrawalAmount: feeConfig.minWithdrawalAmount,
+      maxWithdrawalAmountPerTxn: feeConfig.maxWithdrawalAmountPerTxn,
+      dailyCeilingLimit: feeConfig.dailyCeilingLimit,
+    });
+  }, [feeConfig]);
+
   // Summary Metrics
   const totalWithdrawnAll = users.reduce((acc, u) => acc + (u.totalWithdrawn || 0), 0);
   const totalPendingAll = withdrawals

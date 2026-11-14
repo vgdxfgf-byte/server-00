@@ -18,6 +18,11 @@ export const TransactionDetailsDrawer: React.FC<TransactionDetailsDrawerProps> =
   const { currentRole, deleteTransaction } = useFintech();
   const [copiedId, setCopiedId] = React.useState(false);
   const [copiedUtr, setCopiedUtr] = React.useState(false);
+  const [confirmDelete, setConfirmDelete] = React.useState(false);
+
+  React.useEffect(() => {
+    setConfirmDelete(false);
+  }, [transaction?.id]);
 
   if (!transaction) return null;
 
@@ -259,20 +264,32 @@ export const TransactionDetailsDrawer: React.FC<TransactionDetailsDrawerProps> =
           </button>
 
           {currentRole === 'admin' && (
-            <button
-              onClick={() => {
-                sound.playWarning();
-                if (window.confirm(`Permanently delete transaction history for ${transaction.id}?`)) {
+            confirmDelete ? (
+              <button
+                onClick={() => {
                   deleteTransaction(transaction.id, true);
+                  setConfirmDelete(false);
                   onClose();
-                }
-              }}
-              className="flex items-center justify-center gap-1.5 py-2.5 px-3 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 rounded-xl transition-colors cursor-pointer"
-              title="Delete transaction record"
-            >
-              <Trash2 className="w-4 h-4" />
-              <span>Delete</span>
-            </button>
+                }}
+                className="flex items-center justify-center gap-1.5 py-2.5 px-3 text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white rounded-xl transition-colors cursor-pointer"
+                title="Confirm permanent deletion"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Confirm Delete</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  sound.playWarning();
+                  setConfirmDelete(true);
+                }}
+                className="flex items-center justify-center gap-1.5 py-2.5 px-3 text-xs font-semibold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 rounded-xl transition-colors cursor-pointer"
+                title="Delete transaction record"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>Delete</span>
+              </button>
+            )
           )}
 
           <button

@@ -106,8 +106,12 @@ export const WithdrawalModal: React.FC<WithdrawalModalProps> = ({
       setFormError('');
       setOtpError('');
       setEnteredOtp('');
+      setSelectedUpiId(currentUser.upiBeneficiaries[0]?.upiId || '');
+      setSelectedBankId(currentUser.bankBeneficiaries[0]?.id || '');
+      setIsNewBank(currentUser.bankBeneficiaries.length === 0);
+      setHolderName(currentUser.name);
     }
-  }, [isOpen]);
+  }, [isOpen, currentUser.id]);
 
   if (!isOpen) return null;
 

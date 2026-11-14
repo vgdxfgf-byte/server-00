@@ -1,4 +1,33 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import {
+  User as FirebaseUser,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+} from 'firebase/auth';
+import {
+  collection,
+  doc,
+  getDoc,
+  onSnapshot,
+  query,
+  where,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  writeBatch,
+  serverTimestamp,
+} from 'firebase/firestore';
+import {
+  auth,
+  db,
+  googleProvider,
+  BOOTSTRAPPED_ADMIN_EMAIL,
+  OperationType,
+  handleFirestoreError,
+  cleanUndefined,
+  toIsoString,
+} from '../firebase';
 import {
   User,
   WithdrawalRequest,
@@ -7,7 +36,6 @@ import {
   PaymentMethodType,
   BankBeneficiary,
   UpiBeneficiary,
-  TransactionStatus,
   BalanceAdjustment,
   NotificationItem,
   SystemConfig,
@@ -31,6 +59,14 @@ interface CalculateFeeResult {
 }
 
 interface FintechContextType {
+  firebaseUser: FirebaseUser | null;
+  authReady: boolean;
+  dbLoading: boolean;
+  isAdminAccount: boolean;
+  authError: string | null;
+  signInWithGoogle: () => Promise<void>;
+  logout: () => Promise<void>;
+
   currentUser: User;
   users: User[];
   withdrawals: WithdrawalRequest[];
@@ -63,7 +99,7 @@ interface FintechContextType {
     expectedOtp: string
   ) => { success: boolean; error?: string };
   depositFunds: (amount: number, method: 'UPI' | 'NetBanking' | 'DebitCard') => void;
-  
+
   // Super Admin Withdrawal Actions
   adminApproveRequest: (requestId: string) => void;
   adminMarkProcessing: (requestId: string, utrNumber?: string) => void;
@@ -92,7 +128,12 @@ interface FintechContextType {
   // Beneficiaries
   addBankBeneficiary: (beneficiary: Omit<BankBeneficiary, 'id'>) => void;
   addUpiBeneficiary: (beneficiary: Omit<UpiBeneficiary, 'id'>) => void;
-  deletePayoutAccount: (userId: string, accountType: 'bank' | 'upi', accountId: string, reason?: string) => { success: boolean; error?: string };
+  deletePayoutAccount: (
+    userId: string,
+    accountType: 'bank' | 'upi',
+    accountId: string,
+    reason?: string
+  ) => { success: boolean; error?: string };
 
   // Notifications
   markNotificationRead: (id: string) => void;
@@ -107,118 +148,134 @@ const FintechContext = createContext<FintechContextType | undefined>(undefined);
 
 const STORAGE_KEY_PREFIX = 'payflow_storage_v2_';
 
+const FALLBACK_USER: User = {
+  id: 'loading_user',
+  name: 'PayFlow Account',
+  email: 'user@payflow.app',
+  phone: '+91 98765 00000',
+  role: 'user',
+  kycStatus: 'verified',
+  availableBalance: 0,
+  totalDeposited: 0,
+  totalWithdrawn: 0,
+  pendingWithdrawals: 0,
+  dailyWithdrawalLimit: 500000,
+  withdrawnToday: 0,
+  registeredAt: new Date().toISOString(),
+  bankBeneficiaries: [],
+  upiBeneficiaries: [],
+  isFrozen: false,
+};
+
+function sanitizeUserForWrite(u: User) {
+  return cleanUndefined({
+    id: u.id.slice(0, 128),
+    name: (u.name || 'PayFlow Member').slice(0, 100),
+    email: (u.email || 'member@payflow.app').slice(0, 150),
+    phone: (u.phone || '+91 98765 00000').slice(0, 30),
+    role: u.role,
+    kycStatus: u.kycStatus,
+    avatarUrl: u.avatarUrl ? u.avatarUrl.slice(0, 500) : undefined,
+    availableBalance: Math.max(0, Number(u.availableBalance) || 0),
+    totalDeposited: Math.max(0, Number(u.totalDeposited) || 0),
+    totalWithdrawn: Math.max(0, Number(u.totalWithdrawn) || 0),
+    pendingWithdrawals: Math.max(0, Number(u.pendingWithdrawals) || 0),
+    dailyWithdrawalLimit: Math.max(0, Number(u.dailyWithdrawalLimit) || 500000),
+    withdrawnToday: Math.max(0, Number(u.withdrawnToday) || 0),
+    registeredAt: (u.registeredAt || new Date().toISOString()).slice(0, 50),
+    bankBeneficiaries: (u.bankBeneficiaries || []).slice(0, 10),
+    upiBeneficiaries: (u.upiBeneficiaries || []).slice(0, 10),
+    isFrozen: Boolean(u.isFrozen),
+    address: u.address ? u.address.slice(0, 300) : undefined,
+    panNumber: u.panNumber ? u.panNumber.slice(0, 20) : undefined,
+  });
+}
+
+function mapDocToUser(id: string, data: Record<string, unknown>): User {
+  return {
+    id: String(data.id || id),
+    name: String(data.name || 'PayFlow Member'),
+    email: String(data.email || ''),
+    phone: String(data.phone || '+91 98765 00000'),
+    role: data.role === 'admin' ? 'admin' : 'user',
+    kycStatus:
+      data.kycStatus === 'verified' || data.kycStatus === 'pending' || data.kycStatus === 'unverified'
+        ? data.kycStatus
+        : 'pending',
+    avatarUrl: typeof data.avatarUrl === 'string' ? data.avatarUrl : undefined,
+    availableBalance: Number(data.availableBalance ?? 0),
+    totalDeposited: Number(data.totalDeposited ?? 0),
+    totalWithdrawn: Number(data.totalWithdrawn ?? 0),
+    pendingWithdrawals: Number(data.pendingWithdrawals ?? 0),
+    dailyWithdrawalLimit: Number(data.dailyWithdrawalLimit ?? 500000),
+    withdrawnToday: Number(data.withdrawnToday ?? 0),
+    registeredAt: toIsoString(data.registeredAt),
+    bankBeneficiaries: Array.isArray(data.bankBeneficiaries) ? (data.bankBeneficiaries as BankBeneficiary[]) : [],
+    upiBeneficiaries: Array.isArray(data.upiBeneficiaries) ? (data.upiBeneficiaries as UpiBeneficiary[]) : [],
+    isFrozen: Boolean(data.isFrozen),
+    address: typeof data.address === 'string' ? data.address : undefined,
+    panNumber: typeof data.panNumber === 'string' ? data.panNumber : undefined,
+  };
+}
+
+function mapDocToWithdrawal(id: string, data: Record<string, unknown>): WithdrawalRequest {
+  return {
+    id: String(data.id || id),
+    userId: String(data.userId || ''),
+    userName: String(data.userName || ''),
+    userEmail: String(data.userEmail || ''),
+    amount: Number(data.amount ?? 0),
+    feeAmount: Number(data.feeAmount ?? 0),
+    gstAmount: Number(data.gstAmount ?? 0),
+    netPayableAmount: Number(data.netPayableAmount ?? 0),
+    paymentMethod: data.paymentMethod === 'bank_transfer' ? 'bank_transfer' : 'upi',
+    paymentDetails: (data.paymentDetails as WithdrawalRequest['paymentDetails']) || {},
+    status: (data.status as WithdrawalRequest['status']) || 'pending',
+    utrNumber: typeof data.utrNumber === 'string' ? data.utrNumber : undefined,
+    rejectionReason: typeof data.rejectionReason === 'string' ? data.rejectionReason : undefined,
+    statusTimeline: Array.isArray(data.statusTimeline)
+      ? (data.statusTimeline as WithdrawalRequest['statusTimeline'])
+      : [],
+    createdAt: toIsoString(data.createdAt),
+    updatedAt: toIsoString(data.updatedAt),
+    completedAt: data.completedAt ? toIsoString(data.completedAt) : undefined,
+    referenceNumber: String(data.referenceNumber || id),
+  };
+}
+
 export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Theme state
+  // Theme state (local UI preference)
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}theme`);
       if (saved === 'light' || saved === 'dark') return saved;
-      return 'dark'; // modern dark fintech default
+      return 'dark';
     }
     return 'dark';
   });
 
-  // Current active role
+  // Firebase Auth state
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const [authReady, setAuthReady] = useState<boolean>(false);
+  const [dbLoading, setDbLoading] = useState<boolean>(true);
+  const [isAdminAccount, setIsAdminAccount] = useState<boolean>(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  // Role & Admin view state
   const [currentRole, setCurrentRole] = useState<'user' | 'admin'>('user');
-  const [adminAuthenticated, setAdminAuthenticated] = useState<boolean>(true); // default true for preview ease, can lock/unlock
+  const [adminAuthenticated, setAdminAuthenticated] = useState<boolean>(true);
 
-  // Core application state
-  const [users, setUsers] = useState<User[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}users`);
-    if (saved) {
-      try {
-        const parsed: User[] = JSON.parse(saved);
-        return parsed.map((u) => ({
-          ...u,
-          dailyWithdrawalLimit: Math.max(u.dailyWithdrawalLimit || 0, 500000),
-        }));
-      } catch {
-        return INITIAL_USERS;
-      }
-    }
-    return INITIAL_USERS;
-  });
+  // Live Firestore-backed application state
+  const [users, setUsers] = useState<User[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<string>('');
+  const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
+  const [feeConfig, setFeeConfig] = useState<FeeConfiguration>(INITIAL_FEE_CONFIG);
+  const [adjustments, setAdjustments] = useState<BalanceAdjustment[]>([]);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [systemConfig, setSystemConfig] = useState<SystemConfig>(INITIAL_SYSTEM_CONFIG);
+  const [adminLogs, setAdminLogs] = useState<AdminLog[]>([]);
 
-  const [currentUserId, setCurrentUserId] = useState<string>('usr_vikram_89');
-
-  const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}withdrawals`);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        return INITIAL_WITHDRAWALS;
-      }
-    }
-    return INITIAL_WITHDRAWALS;
-  });
-
-  const [feeConfig, setFeeConfig] = useState<FeeConfiguration>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}feeConfig`);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        // Ensure new 5 Lakhs limit applies even with previous cached data
-        return {
-          ...INITIAL_FEE_CONFIG,
-          ...parsed,
-          maxWithdrawalAmountPerTxn: Math.max(parsed.maxWithdrawalAmountPerTxn || 0, 500000),
-          dailyCeilingLimit: Math.max(parsed.dailyCeilingLimit || 0, 500000),
-        };
-      } catch {
-        return INITIAL_FEE_CONFIG;
-      }
-    }
-    return INITIAL_FEE_CONFIG;
-  });
-
-  const [adjustments, setAdjustments] = useState<BalanceAdjustment[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}adjustments`);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        return INITIAL_ADJUSTMENTS;
-      }
-    }
-    return INITIAL_ADJUSTMENTS;
-  });
-
-  const [notifications, setNotifications] = useState<NotificationItem[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}notifications`);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        return INITIAL_NOTIFICATIONS;
-      }
-    }
-    return INITIAL_NOTIFICATIONS;
-  });
-
-  const [systemConfig, setSystemConfig] = useState<SystemConfig>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}systemConfig`);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        return INITIAL_SYSTEM_CONFIG;
-      }
-    }
-    return INITIAL_SYSTEM_CONFIG;
-  });
-
-  const [adminLogs, setAdminLogs] = useState<AdminLog[]>(() => {
-    const saved = localStorage.getItem(`${STORAGE_KEY_PREFIX}adminLogs`);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch {
-        return INITIAL_ADMIN_LOGS;
-      }
-    }
-    return INITIAL_ADMIN_LOGS;
-  });
+  const seedingRef = useRef<boolean>(false);
 
   // Keep DOM theme updated
   useEffect(() => {
@@ -231,36 +288,425 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     localStorage.setItem(`${STORAGE_KEY_PREFIX}theme`, theme);
   }, [theme]);
 
-  // Sync to localStorage
+  // Listen to Firebase Auth state
   useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}users`, JSON.stringify(users));
-  }, [users]);
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setFirebaseUser(user);
+      setAuthReady(true);
+      if (!user) {
+        setIsAdminAccount(false);
+        setCurrentRole('user');
+        setUsers([]);
+        setWithdrawals([]);
+        setAdjustments([]);
+        setNotifications([]);
+        setAdminLogs([]);
+        setCurrentUserId('');
+        setDbLoading(false);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
 
+  // Bootstrap profile, admin registry, seed data (if admin), and attach real-time onSnapshot listeners
   useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}withdrawals`, JSON.stringify(withdrawals));
-  }, [withdrawals]);
+    if (!authReady || !firebaseUser) return;
 
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}feeConfig`, JSON.stringify(feeConfig));
-  }, [feeConfig]);
+    let isCancelled = false;
+    const unsubscribers: (() => void)[] = [];
 
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}adjustments`, JSON.stringify(adjustments));
-  }, [adjustments]);
+    const setupLiveDatabase = async () => {
+      setDbLoading(true);
+      try {
+        const uid = firebaseUser.uid;
+        const email = firebaseUser.email || '';
+        const isBootstrappedAdmin =
+          email === BOOTSTRAPPED_ADMIN_EMAIL && firebaseUser.emailVerified;
 
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}notifications`, JSON.stringify(notifications));
-  }, [notifications]);
+        let adminRoleExists = false;
+        try {
+          const adminSnap = await getDoc(doc(db, 'admins', uid));
+          adminRoleExists = adminSnap.exists();
+        } catch (err) {
+          handleFirestoreError(err, OperationType.GET, `admins/${uid}`);
+        }
 
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}systemConfig`, JSON.stringify(systemConfig));
-  }, [systemConfig]);
+        const resolvedIsAdmin = isBootstrappedAdmin || adminRoleExists;
+        if (isCancelled) return;
+        setIsAdminAccount(resolvedIsAdmin);
+        setCurrentUserId((prev) => prev || uid);
 
-  useEffect(() => {
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}adminLogs`, JSON.stringify(adminLogs));
-  }, [adminLogs]);
+        // Ensure bootstrapped admin has an /admins/{uid} document
+        if (isBootstrappedAdmin && !adminRoleExists) {
+          try {
+            await setDoc(doc(db, 'admins', uid), {
+              uid,
+              email: email.slice(0, 150),
+              createdAt: serverTimestamp(),
+            });
+          } catch (err) {
+            handleFirestoreError(err, OperationType.CREATE, `admins/${uid}`);
+          }
+        }
 
-  const currentUser = users.find((u) => u.id === currentUserId) || users[0];
+        // Ensure signed-in user's own /users/{uid} document exists
+        const userDocRef = doc(db, 'users', uid);
+        let userDocSnap;
+        try {
+          userDocSnap = await getDoc(userDocRef);
+        } catch (err) {
+          handleFirestoreError(err, OperationType.GET, `users/${uid}`);
+        }
+
+        if (!userDocSnap.exists()) {
+          const newUserProfile: User = {
+            id: uid,
+            name: (firebaseUser.displayName || 'PayFlow Member').slice(0, 100),
+            email: (email || `${uid}@payflow.app`).slice(0, 150),
+            phone: '+91 98765 00000',
+            role: resolvedIsAdmin ? 'admin' : 'user',
+            kycStatus: 'verified',
+            avatarUrl: firebaseUser.photoURL ? firebaseUser.photoURL.slice(0, 500) : undefined,
+            availableBalance: 25000,
+            totalDeposited: 25000,
+            totalWithdrawn: 0,
+            pendingWithdrawals: 0,
+            dailyWithdrawalLimit: 500000,
+            withdrawnToday: 0,
+            registeredAt: new Date().toISOString(),
+            bankBeneficiaries: [],
+            upiBeneficiaries: [],
+            isFrozen: false,
+          };
+
+          try {
+            await setDoc(userDocRef, {
+              ...sanitizeUserForWrite(newUserProfile),
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          } catch (err) {
+            handleFirestoreError(err, OperationType.CREATE, `users/${uid}`);
+          }
+        }
+
+        // Seed initial platform config and demo ledger records once when Admin first opens the app
+        if (resolvedIsAdmin && !seedingRef.current) {
+          seedingRef.current = true;
+          try {
+            const feesSnap = await getDoc(doc(db, 'config', 'fees'));
+            if (!feesSnap.exists()) {
+              const batch = writeBatch(db);
+              batch.set(doc(db, 'config', 'fees'), {
+                ...INITIAL_FEE_CONFIG,
+                updatedAt: serverTimestamp(),
+              });
+              batch.set(doc(db, 'config', 'system'), {
+                ...INITIAL_SYSTEM_CONFIG,
+                updatedAt: serverTimestamp(),
+              });
+
+              for (const seedUser of INITIAL_USERS) {
+                batch.set(doc(db, 'users', seedUser.id), {
+                  ...sanitizeUserForWrite(seedUser),
+                  createdAt: serverTimestamp(),
+                  updatedAt: serverTimestamp(),
+                });
+              }
+
+              for (const seedW of INITIAL_WITHDRAWALS) {
+                batch.set(
+                  doc(db, 'withdrawals', seedW.id),
+                  cleanUndefined({
+                    ...seedW,
+                    createdAt: serverTimestamp(),
+                    updatedAt: serverTimestamp(),
+                  })
+                );
+              }
+
+              for (const seedAdj of INITIAL_ADJUSTMENTS) {
+                batch.set(
+                  doc(db, 'adjustments', seedAdj.id),
+                  cleanUndefined({
+                    ...seedAdj,
+                    createdAt: serverTimestamp(),
+                  })
+                );
+              }
+
+              for (const seedLog of INITIAL_ADMIN_LOGS) {
+                batch.set(
+                  doc(db, 'adminLogs', seedLog.id),
+                  cleanUndefined({
+                    ...seedLog,
+                    createdAt: serverTimestamp(),
+                  })
+                );
+              }
+
+              for (const seedNotif of INITIAL_NOTIFICATIONS) {
+                batch.set(
+                  doc(db, 'notifications', seedNotif.id),
+                  cleanUndefined({
+                    ...seedNotif,
+                    createdAt: serverTimestamp(),
+                    updatedAt: serverTimestamp(),
+                  })
+                );
+              }
+
+              await batch.commit();
+            }
+          } catch (err) {
+            handleFirestoreError(err, OperationType.WRITE, 'seed/initial');
+          }
+        }
+
+        if (isCancelled) return;
+
+        // Attach shared config listeners
+        unsubscribers.push(
+          onSnapshot(
+            doc(db, 'config', 'fees'),
+            (snap) => {
+              if (snap.exists()) {
+                const data = snap.data();
+                setFeeConfig({
+                  ...INITIAL_FEE_CONFIG,
+                  feeType: data.feeType || INITIAL_FEE_CONFIG.feeType,
+                  flatFee: Number(data.flatFee ?? INITIAL_FEE_CONFIG.flatFee),
+                  percentageFee: Number(data.percentageFee ?? INITIAL_FEE_CONFIG.percentageFee),
+                  gstRatePercent: Number(data.gstRatePercent ?? INITIAL_FEE_CONFIG.gstRatePercent),
+                  minWithdrawalAmount: Number(data.minWithdrawalAmount ?? INITIAL_FEE_CONFIG.minWithdrawalAmount),
+                  maxWithdrawalAmountPerTxn: Number(
+                    data.maxWithdrawalAmountPerTxn ?? INITIAL_FEE_CONFIG.maxWithdrawalAmountPerTxn
+                  ),
+                  dailyCeilingLimit: Number(data.dailyCeilingLimit ?? INITIAL_FEE_CONFIG.dailyCeilingLimit),
+                  freeWithdrawalsPerMonth: Number(
+                    data.freeWithdrawalsPerMonth ?? INITIAL_FEE_CONFIG.freeWithdrawalsPerMonth
+                  ),
+                });
+              }
+            },
+            (err) => handleFirestoreError(err, OperationType.GET, 'config/fees')
+          )
+        );
+
+        unsubscribers.push(
+          onSnapshot(
+            doc(db, 'config', 'system'),
+            (snap) => {
+              if (snap.exists()) {
+                const data = snap.data();
+                setSystemConfig({
+                  withdrawalsEnabled: data.withdrawalsEnabled !== false,
+                  maintenanceNotice: typeof data.maintenanceNotice === 'string' ? data.maintenanceNotice : '',
+                  require2FA: data.require2FA !== false,
+                  paymentMethods: Array.isArray(data.paymentMethods)
+                    ? data.paymentMethods
+                    : INITIAL_SYSTEM_CONFIG.paymentMethods,
+                });
+              }
+            },
+            (err) => handleFirestoreError(err, OperationType.GET, 'config/system')
+          )
+        );
+
+        if (resolvedIsAdmin) {
+          // Admin listens to full platform collections in real time
+          unsubscribers.push(
+            onSnapshot(
+              collection(db, 'users'),
+              (snap) => {
+                const list = snap.docs.map((d) => mapDocToUser(d.id, d.data()));
+                setUsers(list);
+                setDbLoading(false);
+              },
+              (err) => handleFirestoreError(err, OperationType.LIST, 'users')
+            )
+          );
+
+          unsubscribers.push(
+            onSnapshot(
+              collection(db, 'withdrawals'),
+              (snap) => {
+                const list = snap.docs
+                  .map((d) => mapDocToWithdrawal(d.id, d.data()))
+                  .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+                setWithdrawals(list);
+              },
+              (err) => handleFirestoreError(err, OperationType.LIST, 'withdrawals')
+            )
+          );
+
+          unsubscribers.push(
+            onSnapshot(
+              collection(db, 'notifications'),
+              (snap) => {
+                const list = snap.docs
+                  .map((d) => {
+                    const data = d.data();
+                    return {
+                      id: String(data.id || d.id),
+                      userId: String(data.userId || ''),
+                      title: String(data.title || ''),
+                      message: String(data.message || ''),
+                      type: (data.type as NotificationItem['type']) || 'system',
+                      timestamp: String(data.timestamp || toIsoString(data.createdAt)),
+                      read: Boolean(data.read),
+                      linkTxnId: typeof data.linkTxnId === 'string' ? data.linkTxnId : undefined,
+                    };
+                  })
+                  .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                setNotifications(list);
+              },
+              (err) => handleFirestoreError(err, OperationType.LIST, 'notifications')
+            )
+          );
+
+          unsubscribers.push(
+            onSnapshot(
+              collection(db, 'adjustments'),
+              (snap) => {
+                const list = snap.docs
+                  .map((d) => {
+                    const data = d.data();
+                    return {
+                      id: String(data.id || d.id),
+                      userId: String(data.userId || ''),
+                      userName: String(data.userName || ''),
+                      userEmail: String(data.userEmail || ''),
+                      type: data.type as BalanceAdjustment['type'],
+                      targetFund: data.targetFund as BalanceAdjustment['targetFund'],
+                      previousBalance: Number(data.previousBalance ?? 0),
+                      adjustmentAmount: Number(data.adjustmentAmount ?? 0),
+                      newBalance: Number(data.newBalance ?? 0),
+                      reason: String(data.reason || ''),
+                      adminName: String(data.adminName || ''),
+                      timestamp: String(data.timestamp || toIsoString(data.createdAt)),
+                    };
+                  })
+                  .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                setAdjustments(list);
+              },
+              (err) => handleFirestoreError(err, OperationType.LIST, 'adjustments')
+            )
+          );
+
+          unsubscribers.push(
+            onSnapshot(
+              collection(db, 'adminLogs'),
+              (snap) => {
+                const list = snap.docs
+                  .map((d) => {
+                    const data = d.data();
+                    return {
+                      id: String(data.id || d.id),
+                      timestamp: String(data.timestamp || toIsoString(data.createdAt)),
+                      adminName: String(data.adminName || ''),
+                      action: String(data.action || ''),
+                      targetId: typeof data.targetId === 'string' ? data.targetId : undefined,
+                      details: String(data.details || ''),
+                      ipAddress: String(data.ipAddress || '127.0.0.1'),
+                    };
+                  })
+                  .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                setAdminLogs(list);
+              },
+              (err) => handleFirestoreError(err, OperationType.LIST, 'adminLogs')
+            )
+          );
+        } else {
+          // Regular user strictly listens ONLY to their own PII-isolated records
+          unsubscribers.push(
+            onSnapshot(
+              doc(db, 'users', uid),
+              (snap) => {
+                if (snap.exists()) {
+                  setUsers([mapDocToUser(snap.id, snap.data())]);
+                }
+                setDbLoading(false);
+              },
+              (err) => handleFirestoreError(err, OperationType.GET, `users/${uid}`)
+            )
+          );
+
+          unsubscribers.push(
+            onSnapshot(
+              query(collection(db, 'withdrawals'), where('userId', '==', uid)),
+              (snap) => {
+                const list = snap.docs
+                  .map((d) => mapDocToWithdrawal(d.id, d.data()))
+                  .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+                setWithdrawals(list);
+              },
+              (err) => handleFirestoreError(err, OperationType.LIST, 'withdrawals')
+            )
+          );
+
+          unsubscribers.push(
+            onSnapshot(
+              query(collection(db, 'notifications'), where('userId', '==', uid)),
+              (snap) => {
+                const list = snap.docs
+                  .map((d) => {
+                    const data = d.data();
+                    return {
+                      id: String(data.id || d.id),
+                      userId: String(data.userId || ''),
+                      title: String(data.title || ''),
+                      message: String(data.message || ''),
+                      type: (data.type as NotificationItem['type']) || 'system',
+                      timestamp: String(data.timestamp || toIsoString(data.createdAt)),
+                      read: Boolean(data.read),
+                      linkTxnId: typeof data.linkTxnId === 'string' ? data.linkTxnId : undefined,
+                    };
+                  })
+                  .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                setNotifications(list);
+              },
+              (err) => handleFirestoreError(err, OperationType.LIST, 'notifications')
+            )
+          );
+        }
+      } catch (err) {
+        if (!isCancelled) {
+          setDbLoading(false);
+          throw err;
+        }
+      }
+    };
+
+    setupLiveDatabase();
+
+    return () => {
+      isCancelled = true;
+      unsubscribers.forEach((unsub) => unsub());
+    };
+  }, [authReady, firebaseUser]);
+
+  const signInWithGoogle = useCallback(async () => {
+    setAuthError(null);
+    try {
+      sound.playClick();
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Google Sign-In failed.';
+      setAuthError(msg);
+    }
+  }, []);
+
+  const logout = useCallback(async () => {
+    sound.playClick();
+    await signOut(auth);
+  }, []);
+
+  const currentUser =
+    users.find((u) => u.id === currentUserId) ||
+    users.find((u) => u.id === firebaseUser?.uid) ||
+    users[0] ||
+    FALLBACK_USER;
 
   const toggleTheme = () => {
     sound.playClick();
@@ -268,14 +714,22 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
   };
 
   const switchRole = (role: 'user' | 'admin') => {
+    if (role === 'admin' && !isAdminAccount) {
+      sound.playWarning();
+      return;
+    }
     sound.playClick();
     setCurrentRole(role);
     if (role === 'admin') {
-      const adminUser = users.find((u) => u.role === 'admin');
+      const adminUser =
+        users.find((u) => u.id === firebaseUser?.uid) || users.find((u) => u.role === 'admin');
       if (adminUser) setCurrentUserId(adminUser.id);
     } else {
-      const normalUser = users.find((u) => u.role === 'user');
-      if (normalUser) setCurrentUserId(normalUser.id);
+      const preferredUser =
+        users.find((u) => u.id === firebaseUser?.uid) ||
+        users.find((u) => u.role === 'user') ||
+        users[0];
+      if (preferredUser) setCurrentUserId(preferredUser.id);
     }
   };
 
@@ -284,25 +738,47 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setCurrentUserId(userId);
   };
 
-  // Dispatch in-app notification helper
-  const sendNotification = (
+  const writeNotificationDoc = (
     userId: string,
     title: string,
     message: string,
     type: 'withdrawal' | 'balance' | 'security' | 'system',
     linkTxnId?: string
   ) => {
-    const newNotif: NotificationItem = {
-      id: `notif_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
-      userId,
-      title,
-      message,
+    const id = `notif_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+    const payload = cleanUndefined({
+      id: id.slice(0, 128),
+      userId: userId.slice(0, 128),
+      title: title.slice(0, 150),
+      message: message.slice(0, 500),
       type,
       timestamp: new Date().toISOString(),
       read: false,
-      linkTxnId,
-    };
-    setNotifications((prev) => [newNotif, ...prev]);
+      linkTxnId: linkTxnId ? linkTxnId.slice(0, 128) : undefined,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    setDoc(doc(db, 'notifications', id), payload).catch((err) =>
+      handleFirestoreError(err, OperationType.CREATE, `notifications/${id}`)
+    );
+  };
+
+  const writeAdminLogDoc = (action: string, details: string, targetId?: string) => {
+    if (!isAdminAccount) return;
+    const id = `log_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+    const payload = cleanUndefined({
+      id: id.slice(0, 128),
+      timestamp: new Date().toISOString(),
+      adminName: (firebaseUser?.displayName || 'Super Admin').slice(0, 100),
+      action: action.slice(0, 100),
+      targetId: targetId ? targetId.slice(0, 128) : undefined,
+      details: details.slice(0, 1000),
+      ipAddress: '103.21.244.18',
+      createdAt: serverTimestamp(),
+    });
+    setDoc(doc(db, 'adminLogs', id), payload).catch((err) =>
+      handleFirestoreError(err, OperationType.CREATE, `adminLogs/${id}`)
+    );
   };
 
   // Fee Calculation Engine
@@ -333,7 +809,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
   };
 
-  // Request Withdrawal (Step 1 -> Creates pending request, reserves balance, issues 2FA OTP)
+  // Request Withdrawal (Atomic Batch: reserves user balance + creates pending withdrawal doc)
   const requestWithdrawal = ({
     amount,
     paymentMethod,
@@ -420,8 +896,8 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const newRequest: WithdrawalRequest = {
       id: txnId,
       userId: currentUser.id,
-      userName: currentUser.name,
-      userEmail: currentUser.email,
+      userName: currentUser.name.slice(0, 100),
+      userEmail: currentUser.email.slice(0, 150),
       amount,
       feeAmount,
       gstAmount,
@@ -440,27 +916,44 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
           description: `Withdrawal request for ₹${amount.toLocaleString('en-IN')} created via ${
             paymentMethod === 'upi' ? 'UPI' : 'Bank Transfer'
           }.`,
-          actor: currentUser.name,
+          actor: currentUser.name.slice(0, 100),
         },
       ],
     };
 
-    // Deduct available balance and reserve into pendingWithdrawals
-    setUsers((prevUsers) =>
-      prevUsers.map((u) => {
-        if (u.id === currentUser.id) {
-          return {
-            ...u,
-            availableBalance: Math.round((u.availableBalance - amount) * 100) / 100,
-            pendingWithdrawals: Math.round((u.pendingWithdrawals + amount) * 100) / 100,
-            withdrawnToday: Math.round((u.withdrawnToday + amount) * 100) / 100,
-          };
-        }
-        return u;
+    const nextAvailable = Math.round((currentUser.availableBalance - amount) * 100) / 100;
+    const nextPending = Math.round((currentUser.pendingWithdrawals + amount) * 100) / 100;
+    const nextToday = Math.round((currentUser.withdrawnToday + amount) * 100) / 100;
+
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'users', currentUser.id), {
+      availableBalance: nextAvailable,
+      pendingWithdrawals: nextPending,
+      withdrawnToday: nextToday,
+      updatedAt: serverTimestamp(),
+    });
+    batch.set(
+      doc(db, 'withdrawals', txnId),
+      cleanUndefined({
+        id: txnId,
+        userId: currentUser.id,
+        userName: currentUser.name.slice(0, 100),
+        userEmail: currentUser.email.slice(0, 150),
+        amount,
+        feeAmount,
+        gstAmount,
+        netPayableAmount,
+        paymentMethod,
+        paymentDetails,
+        status: 'pending',
+        referenceNumber: refNum,
+        statusTimeline: newRequest.statusTimeline,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
       })
     );
 
-    setWithdrawals((prev) => [newRequest, ...prev]);
+    batch.commit().catch((err) => handleFirestoreError(err, OperationType.WRITE, `withdrawals/${txnId}`));
 
     return {
       success: true,
@@ -469,7 +962,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
   };
 
-  // Verify OTP and advance transaction
+  // Verify OTP and advance transaction timeline
   const verifyOtpAndSubmit = (requestId: string, enteredOtp: string, expectedOtp: string) => {
     if (enteredOtp.trim() !== expectedOtp.trim()) {
       sound.playWarning();
@@ -478,34 +971,27 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     sound.playSuccess();
     const nowIso = new Date().toISOString();
+    const targetReq = withdrawals.find((w) => w.id === requestId);
+    const updatedTimeline = [
+      ...(targetReq?.statusTimeline || []),
+      {
+        status: 'pending' as const,
+        timestamp: nowIso,
+        title: '2FA OTP Verified',
+        description: 'Customer authenticated via 6-digit secure SMS OTP. Request forwarded to Treasury queue.',
+        actor: 'PayFlow Security Gateway',
+      },
+    ].slice(0, 20);
 
-    setWithdrawals((prev) =>
-      prev.map((req) => {
-        if (req.id === requestId) {
-          return {
-            ...req,
-            status: 'pending',
-            updatedAt: nowIso,
-            statusTimeline: [
-              ...req.statusTimeline,
-              {
-                status: 'pending',
-                timestamp: nowIso,
-                title: '2FA OTP Verified',
-                description: 'Customer authenticated via 6-digit secure SMS OTP. Request forwarded to Treasury queue.',
-                actor: 'PayFlow Security Gateway',
-              },
-            ],
-          };
-        }
-        return req;
-      })
-    );
+    updateDoc(doc(db, 'withdrawals', requestId), {
+      statusTimeline: updatedTimeline,
+      updatedAt: serverTimestamp(),
+    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `withdrawals/${requestId}`));
 
-    sendNotification(
+    writeNotificationDoc(
       currentUser.id,
       'Withdrawal Request Submitted',
-      `Your payout request ${requestId} for ₹${currentUser.availableBalance} has been authenticated with 2FA and queued for review.`,
+      `Your payout request ${requestId} has been authenticated with 2FA and queued for review.`,
       'withdrawal',
       requestId
     );
@@ -513,73 +999,64 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return { success: true };
   };
 
-  // Deposit funds
+  // Deposit funds (Admin-authorized ledger credit)
   const depositFunds = (amount: number, method: 'UPI' | 'NetBanking' | 'DebitCard') => {
     if (amount <= 0) return;
+    if (!isAdminAccount) {
+      sound.playWarning();
+      return;
+    }
     sound.playSuccess();
 
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === currentUser.id) {
-          return {
-            ...u,
-            availableBalance: Math.round((u.availableBalance + amount) * 100) / 100,
-            totalDeposited: Math.round((u.totalDeposited + amount) * 100) / 100,
-          };
-        }
-        return u;
-      })
-    );
+    const nextAvailable = Math.round((currentUser.availableBalance + amount) * 100) / 100;
+    const nextDeposited = Math.round((currentUser.totalDeposited + amount) * 100) / 100;
 
-    sendNotification(
+    updateDoc(doc(db, 'users', currentUser.id), {
+      availableBalance: nextAvailable,
+      totalDeposited: nextDeposited,
+      updatedAt: serverTimestamp(),
+    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `users/${currentUser.id}`));
+
+    writeNotificationDoc(
       currentUser.id,
       'Deposit Successful',
       `₹${amount.toLocaleString('en-IN')} was successfully deposited into your wallet via ${method}.`,
       'balance'
     );
 
-    const newLog: AdminLog = {
-      id: `log_${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      adminName: 'Payment Gateway (Auto)',
-      action: 'DEPOSIT_SUCCESS',
-      details: `User ${currentUser.name} deposited ₹${amount.toLocaleString('en-IN')} via ${method}. Instant settlement.`,
-      ipAddress: '103.21.244.18',
-    };
-    setAdminLogs((prev) => [newLog, ...prev]);
+    writeAdminLogDoc(
+      'DEPOSIT_SUCCESS',
+      `User ${currentUser.name} deposited ₹${amount.toLocaleString('en-IN')} via ${method}. Instant settlement.`,
+      currentUser.id
+    );
   };
 
-  // SUPER ADMIN ACTION 1: Approve Request (Moves from 'pending' to 'approved')
+  // SUPER ADMIN ACTION 1: Approve Request
   const adminApproveRequest = (requestId: string) => {
-    sound.playSuccess();
-    const nowIso = new Date().toISOString();
     const targetReq = withdrawals.find((r) => r.id === requestId);
     if (!targetReq) return;
+    sound.playSuccess();
+    const nowIso = new Date().toISOString();
 
-    setWithdrawals((prev) =>
-      prev.map((req) => {
-        if (req.id === requestId) {
-          return {
-            ...req,
-            status: 'approved',
-            updatedAt: nowIso,
-            statusTimeline: [
-              ...req.statusTimeline,
-              {
-                status: 'approved',
-                timestamp: nowIso,
-                title: 'Withdrawal Approved by Compliance',
-                description: 'Super Admin reviewed and approved the withdrawal request. Scheduled for banking gateway dispatch.',
-                actor: 'Super Admin',
-              },
-            ],
-          };
-        }
-        return req;
-      })
-    );
+    const nextTimeline = [
+      ...targetReq.statusTimeline,
+      {
+        status: 'approved' as const,
+        timestamp: nowIso,
+        title: 'Withdrawal Approved by Compliance',
+        description:
+          'Super Admin reviewed and approved the withdrawal request. Scheduled for banking gateway dispatch.',
+        actor: 'Super Admin',
+      },
+    ].slice(0, 20);
 
-    sendNotification(
+    updateDoc(doc(db, 'withdrawals', requestId), {
+      status: 'approved',
+      statusTimeline: nextTimeline,
+      updatedAt: serverTimestamp(),
+    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `withdrawals/${requestId}`));
+
+    writeNotificationDoc(
       targetReq.userId,
       'Withdrawal Approved',
       `Your withdrawal request ${targetReq.id} for ₹${targetReq.amount.toLocaleString(
@@ -589,54 +1066,46 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       targetReq.id
     );
 
-    const newLog: AdminLog = {
-      id: `log_${Date.now()}`,
-      timestamp: nowIso,
-      adminName: 'Super Admin',
-      action: 'APPROVE_WITHDRAWAL',
-      targetId: requestId,
-      details: `Approved withdrawal of ₹${targetReq.amount.toLocaleString('en-IN')} for ${targetReq.userName}. Status: APPROVED.`,
-      ipAddress: '103.21.244.18',
-    };
-    setAdminLogs((prev) => [newLog, ...prev]);
+    writeAdminLogDoc(
+      'APPROVE_WITHDRAWAL',
+      `Approved withdrawal of ₹${targetReq.amount.toLocaleString('en-IN')} for ${targetReq.userName}. Status: APPROVED.`,
+      requestId
+    );
   };
 
-  // SUPER ADMIN ACTION 2: Mark Processing (Dispatches to banking rail)
+  // SUPER ADMIN ACTION 2: Mark Processing
   const adminMarkProcessing = (requestId: string, customUtr?: string) => {
-    sound.playSuccess();
-    const nowIso = new Date().toISOString();
     const targetReq = withdrawals.find((r) => r.id === requestId);
     if (!targetReq) return;
+    sound.playSuccess();
+    const nowIso = new Date().toISOString();
 
-    const utr =
+    const utr = (
       customUtr?.trim() ||
-      `UTR${new Date().getFullYear().toString().slice(2)}${Math.floor(1000000000 + Math.random() * 9000000000)}`;
+      `UTR${new Date().getFullYear().toString().slice(2)}${Math.floor(1000000000 + Math.random() * 9000000000)}`
+    ).slice(0, 64);
 
-    setWithdrawals((prev) =>
-      prev.map((req) => {
-        if (req.id === requestId) {
-          return {
-            ...req,
-            status: 'processing',
-            utrNumber: utr,
-            updatedAt: nowIso,
-            statusTimeline: [
-              ...req.statusTimeline,
-              {
-                status: 'processing',
-                timestamp: nowIso,
-                title: 'Dispatched to Banking Network',
-                description: `Dispatched to ${targetReq.paymentMethod === 'upi' ? 'NPCI UPI' : 'RBI IMPS'} network with reference ${utr}.`,
-                actor: 'Super Admin & Gateway Engine',
-              },
-            ],
-          };
-        }
-        return req;
-      })
-    );
+    const nextTimeline = [
+      ...targetReq.statusTimeline,
+      {
+        status: 'processing' as const,
+        timestamp: nowIso,
+        title: 'Dispatched to Banking Network',
+        description: `Dispatched to ${
+          targetReq.paymentMethod === 'upi' ? 'NPCI UPI' : 'RBI IMPS'
+        } network with reference ${utr}.`,
+        actor: 'Super Admin & Gateway Engine',
+      },
+    ].slice(0, 20);
 
-    sendNotification(
+    updateDoc(doc(db, 'withdrawals', requestId), {
+      status: 'processing',
+      utrNumber: utr,
+      statusTimeline: nextTimeline,
+      updatedAt: serverTimestamp(),
+    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `withdrawals/${requestId}`));
+
+    writeNotificationDoc(
       targetReq.userId,
       'Payout in Processing',
       `Your payout ${targetReq.id} is now processing in the banking rail with reference ${utr}.`,
@@ -644,170 +1113,145 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       targetReq.id
     );
 
-    const newLog: AdminLog = {
-      id: `log_${Date.now()}`,
-      timestamp: nowIso,
-      adminName: 'Super Admin',
-      action: 'DISPATCH_PROCESSING',
-      targetId: requestId,
-      details: `Dispatched payout for ${targetReq.userName} (₹${targetReq.amount.toLocaleString('en-IN')}) to banking rails. Ref: ${utr}.`,
-      ipAddress: '103.21.244.18',
-    };
-    setAdminLogs((prev) => [newLog, ...prev]);
+    writeAdminLogDoc(
+      'DISPATCH_PROCESSING',
+      `Dispatched payout for ${targetReq.userName} (₹${targetReq.amount.toLocaleString(
+        'en-IN'
+      )}) to banking rails. Ref: ${utr}.`,
+      requestId
+    );
   };
 
-  // SUPER ADMIN ACTION 3: Mark Completed (Actual payment confirmed with UTR)
+  // SUPER ADMIN ACTION 3: Mark Completed
   const adminMarkCompleted = (requestId: string, utrNumber: string) => {
-    sound.playSuccess();
-    const nowIso = new Date().toISOString();
     const targetReq = withdrawals.find((r) => r.id === requestId);
     if (!targetReq) return;
+    sound.playSuccess();
+    const nowIso = new Date().toISOString();
 
-    const finalUtr =
+    const finalUtr = (
       utrNumber.trim() ||
       targetReq.utrNumber ||
-      `UTR${new Date().getFullYear().toString().slice(2)}${Math.floor(1000000000 + Math.random() * 9000000000)}`;
+      `UTR${new Date().getFullYear().toString().slice(2)}${Math.floor(1000000000 + Math.random() * 9000000000)}`
+    ).slice(0, 64);
 
-    setWithdrawals((prev) =>
-      prev.map((req) => {
-        if (req.id === requestId) {
-          return {
-            ...req,
-            status: 'completed',
-            utrNumber: finalUtr,
-            updatedAt: nowIso,
-            completedAt: nowIso,
-            statusTimeline: [
-              ...req.statusTimeline,
-              {
-                status: 'completed',
-                timestamp: nowIso,
-                title: 'Payout Settled & Confirmed',
-                description: `Bank transfer verified and confirmed by Treasury. UTR: ${finalUtr}.`,
-                actor: 'Super Admin / Core Settlement Node',
-              },
-            ],
-          };
-        }
-        return req;
-      })
-    );
+    const nextTimeline = [
+      ...targetReq.statusTimeline,
+      {
+        status: 'completed' as const,
+        timestamp: nowIso,
+        title: 'Payout Settled & Confirmed',
+        description: `Bank transfer verified and confirmed by Treasury. UTR: ${finalUtr}.`,
+        actor: 'Super Admin / Core Settlement Node',
+      },
+    ].slice(0, 20);
 
-    // Deduct from pendingWithdrawals and add to totalWithdrawn for the user
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === targetReq.userId) {
-          return {
-            ...u,
-            pendingWithdrawals: Math.max(
-              0,
-              Math.round((u.pendingWithdrawals - targetReq.amount) * 100) / 100
-            ),
-            totalWithdrawn: Math.round((u.totalWithdrawn + targetReq.amount) * 100) / 100,
-          };
-        }
-        return u;
-      })
-    );
+    const targetUser = users.find((u) => u.id === targetReq.userId);
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'withdrawals', requestId), {
+      status: 'completed',
+      utrNumber: finalUtr,
+      completedAt: nowIso,
+      statusTimeline: nextTimeline,
+      updatedAt: serverTimestamp(),
+    });
+    if (targetUser) {
+      batch.update(doc(db, 'users', targetUser.id), {
+        pendingWithdrawals: Math.max(
+          0,
+          Math.round((targetUser.pendingWithdrawals - targetReq.amount) * 100) / 100
+        ),
+        totalWithdrawn: Math.round((targetUser.totalWithdrawn + targetReq.amount) * 100) / 100,
+        updatedAt: serverTimestamp(),
+      });
+    }
+    batch
+      .commit()
+      .catch((err) => handleFirestoreError(err, OperationType.WRITE, `withdrawals/${requestId}`));
 
-    sendNotification(
+    writeNotificationDoc(
       targetReq.userId,
       'Payout Settled & Completed',
-      `₹${targetReq.netPayableAmount.toLocaleString('en-IN')} has been successfully transferred to your account. UTR: ${finalUtr}.`,
+      `₹${targetReq.netPayableAmount.toLocaleString(
+        'en-IN'
+      )} has been successfully transferred to your account. UTR: ${finalUtr}.`,
       'withdrawal',
       targetReq.id
     );
 
-    const newLog: AdminLog = {
-      id: `log_${Date.now()}`,
-      timestamp: nowIso,
-      adminName: 'Super Admin',
-      action: 'SETTLE_COMPLETED',
-      targetId: requestId,
-      details: `Settled withdrawal of ₹${targetReq.amount.toLocaleString(
-        'en-IN'
-      )} for ${targetReq.userName}. Bank UTR: ${finalUtr}.`,
-      ipAddress: '103.21.244.18',
-    };
-    setAdminLogs((prev) => [newLog, ...prev]);
+    writeAdminLogDoc(
+      'SETTLE_COMPLETED',
+      `Settled withdrawal of ₹${targetReq.amount.toLocaleString('en-IN')} for ${
+        targetReq.userName
+      }. Bank UTR: ${finalUtr}.`,
+      requestId
+    );
   };
 
   // SUPER ADMIN ACTION 4: Reject Request (Reverses funds back to available balance)
   const adminRejectRequest = (requestId: string, reason: string) => {
-    sound.playWarning();
-    const nowIso = new Date().toISOString();
     const targetReq = withdrawals.find((r) => r.id === requestId);
     if (!targetReq) return;
+    sound.playWarning();
+    const nowIso = new Date().toISOString();
+    const cleanReason = reason.slice(0, 500);
 
-    setWithdrawals((prev) =>
-      prev.map((req) => {
-        if (req.id === requestId) {
-          return {
-            ...req,
-            status: 'rejected',
-            rejectionReason: reason,
-            updatedAt: nowIso,
-            statusTimeline: [
-              ...req.statusTimeline,
-              {
-                status: 'rejected',
-                timestamp: nowIso,
-                title: 'Withdrawal Rejected & Refunded',
-                description: `Reason: ${reason}. Full ₹${targetReq.amount.toLocaleString(
-                  'en-IN'
-                )} restored to user available balance.`,
-                actor: 'Super Admin / Compliance',
-              },
-            ],
-          };
-        }
-        return req;
-      })
-    );
+    const nextTimeline = [
+      ...targetReq.statusTimeline,
+      {
+        status: 'rejected' as const,
+        timestamp: nowIso,
+        title: 'Withdrawal Rejected & Refunded',
+        description: `Reason: ${cleanReason}. Full ₹${targetReq.amount.toLocaleString(
+          'en-IN'
+        )} restored to user available balance.`,
+        actor: 'Super Admin / Compliance',
+      },
+    ].slice(0, 20);
 
-    // Reverse reserved funds back into user available balance
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === targetReq.userId) {
-          return {
-            ...u,
-            availableBalance: Math.round((u.availableBalance + targetReq.amount) * 100) / 100,
-            pendingWithdrawals: Math.max(
-              0,
-              Math.round((u.pendingWithdrawals - targetReq.amount) * 100) / 100
-            ),
-            withdrawnToday: Math.max(
-              0,
-              Math.round((u.withdrawnToday - targetReq.amount) * 100) / 100
-            ),
-          };
-        }
-        return u;
-      })
-    );
+    const targetUser = users.find((u) => u.id === targetReq.userId);
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'withdrawals', requestId), {
+      status: 'rejected',
+      rejectionReason: cleanReason,
+      statusTimeline: nextTimeline,
+      updatedAt: serverTimestamp(),
+    });
+    if (targetUser) {
+      batch.update(doc(db, 'users', targetUser.id), {
+        availableBalance: Math.round((targetUser.availableBalance + targetReq.amount) * 100) / 100,
+        pendingWithdrawals: Math.max(
+          0,
+          Math.round((targetUser.pendingWithdrawals - targetReq.amount) * 100) / 100
+        ),
+        withdrawnToday: Math.max(
+          0,
+          Math.round((targetUser.withdrawnToday - targetReq.amount) * 100) / 100
+        ),
+        updatedAt: serverTimestamp(),
+      });
+    }
+    batch
+      .commit()
+      .catch((err) => handleFirestoreError(err, OperationType.WRITE, `withdrawals/${requestId}`));
 
-    sendNotification(
+    writeNotificationDoc(
       targetReq.userId,
       'Withdrawal Rejected & Refunded',
       `Your request ${targetReq.id} for ₹${targetReq.amount.toLocaleString(
         'en-IN'
-      )} was rejected (${reason}). The full amount has been refunded to your wallet.`,
+      )} was rejected (${cleanReason}). The full amount has been refunded to your wallet.`,
       'withdrawal',
       targetReq.id
     );
 
-    const newLog: AdminLog = {
-      id: `log_${Date.now()}`,
-      timestamp: nowIso,
-      adminName: 'Super Admin',
-      action: 'REJECT_WITHDRAWAL',
-      targetId: requestId,
-      details: `Rejected withdrawal of ₹${targetReq.amount.toLocaleString(
+    writeAdminLogDoc(
+      'REJECT_WITHDRAWAL',
+      `Rejected withdrawal of ₹${targetReq.amount.toLocaleString(
         'en-IN'
-      )}. Reason: "${reason}". Full amount refunded to user.`,
-      ipAddress: '103.21.244.18',
-    };
-    setAdminLogs((prev) => [newLog, ...prev]);
+      )}. Reason: "${cleanReason}". Full amount refunded to user.`,
+      requestId
+    );
   };
 
   // SUPER ADMIN ACTION 5: Delete Transaction History Record
@@ -818,76 +1262,61 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return { success: false, error: 'Transaction record not found.' };
     }
 
-    const nowIso = new Date().toISOString();
+    const targetUser = users.find((u) => u.id === target.userId);
+    const batch = writeBatch(db);
 
-    // If transaction was in pending/approved/processing state and refund is requested,
-    // restore the reserved funds back to user's available balance and deduct from pending
-    if (refundIfPending && (target.status === 'pending' || target.status === 'approved' || target.status === 'processing')) {
-      setUsers((prev) =>
-        prev.map((u) => {
-          if (u.id === target.userId) {
-            return {
-              ...u,
-              availableBalance: Math.round((u.availableBalance + target.amount) * 100) / 100,
-              pendingWithdrawals: Math.max(
-                0,
-                Math.round((u.pendingWithdrawals - target.amount) * 100) / 100
-              ),
-              withdrawnToday: Math.max(
-                0,
-                Math.round((u.withdrawnToday - target.amount) * 100) / 100
-              ),
-            };
-          }
-          return u;
-        })
-      );
-    } else if (target.status === 'completed') {
-      // Completed payout deleted from records - decrement user's totalWithdrawn metric
-      setUsers((prev) =>
-        prev.map((u) => {
-          if (u.id === target.userId) {
-            return {
-              ...u,
-              totalWithdrawn: Math.max(
-                0,
-                Math.round((u.totalWithdrawn - target.amount) * 100) / 100
-              ),
-            };
-          }
-          return u;
-        })
-      );
+    if (
+      targetUser &&
+      refundIfPending &&
+      (target.status === 'pending' || target.status === 'approved' || target.status === 'processing')
+    ) {
+      batch.update(doc(db, 'users', targetUser.id), {
+        availableBalance: Math.round((targetUser.availableBalance + target.amount) * 100) / 100,
+        pendingWithdrawals: Math.max(
+          0,
+          Math.round((targetUser.pendingWithdrawals - target.amount) * 100) / 100
+        ),
+        withdrawnToday: Math.max(
+          0,
+          Math.round((targetUser.withdrawnToday - target.amount) * 100) / 100
+        ),
+        updatedAt: serverTimestamp(),
+      });
+    } else if (targetUser && target.status === 'completed') {
+      batch.update(doc(db, 'users', targetUser.id), {
+        totalWithdrawn: Math.max(
+          0,
+          Math.round((targetUser.totalWithdrawn - target.amount) * 100) / 100
+        ),
+        updatedAt: serverTimestamp(),
+      });
     }
 
-    // Remove transaction record
-    setWithdrawals((prev) => prev.filter((w) => w.id !== requestId));
+    batch.delete(doc(db, 'withdrawals', requestId));
+    notifications
+      .filter((n) => n.linkTxnId === requestId)
+      .forEach((n) => batch.delete(doc(db, 'notifications', n.id)));
 
-    // Remove any related notification links
-    setNotifications((prev) => prev.filter((n) => n.linkTxnId !== requestId));
+    batch
+      .commit()
+      .catch((err) => handleFirestoreError(err, OperationType.DELETE, `withdrawals/${requestId}`));
 
-    // Immutable administrative audit log entry
-    const newLog: AdminLog = {
-      id: `log_${Date.now()}`,
-      timestamp: nowIso,
-      adminName: 'Super Admin',
-      action: 'DELETE_TRANSACTION_HISTORY',
-      targetId: requestId,
-      details: `Permanently deleted transaction ${requestId} (${target.status.toUpperCase()}, ₹${target.amount.toLocaleString(
+    writeAdminLogDoc(
+      'DELETE_TRANSACTION_HISTORY',
+      `Permanently deleted transaction ${requestId} (${target.status.toUpperCase()}, ₹${target.amount.toLocaleString(
         'en-IN'
       )}) for user ${target.userName} (${target.userId}). ${
         target.status === 'pending' || target.status === 'approved' || target.status === 'processing'
           ? `₹${target.amount.toLocaleString('en-IN')} reserved funds reversed to user balance.`
           : 'Historical ledger record purged.'
       }`,
-      ipAddress: '103.21.244.18',
-    };
-    setAdminLogs((prev) => [newLog, ...prev]);
+      requestId
+    );
 
     return { success: true };
   };
 
-  // SUPER ADMIN REQUIREMENT 3: Dedicated Funds & Balance Management
+  // SUPER ADMIN: Balance Management
   const adjustUserBalance = ({
     userId,
     type,
@@ -903,7 +1332,10 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
   }) => {
     if (!reason || reason.trim().length < 5) {
       sound.playWarning();
-      return { success: false, error: 'A mandatory audit reason (minimum 5 characters) is required for all fund adjustments.' };
+      return {
+        success: false,
+        error: 'A mandatory audit reason (minimum 5 characters) is required for all fund adjustments.',
+      };
     }
 
     const targetUser = users.find((u) => u.id === userId);
@@ -923,7 +1355,10 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (amount <= 0) return { success: false, error: 'Decrease amount must be greater than 0.' };
       if (prevBal - amount < 0) {
         sound.playWarning();
-        return { success: false, error: `Cannot deduct ₹${amount}. Current fund value is only ₹${prevBal}. Negative values are prohibited.` };
+        return {
+          success: false,
+          error: `Cannot deduct ₹${amount}. Current fund value is only ₹${prevBal}. Negative values are prohibited.`,
+        };
       }
       newBal = Math.round((prevBal - amount) * 100) / 100;
     } else if (type === 'set_fixed') {
@@ -937,7 +1372,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     sound.playSuccess();
     const nowIso = new Date().toISOString();
-    const adjId = `ADJ-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`;
+    const adjId = `ADJ-${nowIso.slice(0, 10).replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`;
 
     const targetFundNames: Record<string, string> = {
       availableBalance: 'Available Balance',
@@ -947,42 +1382,44 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       totalWithdrawn: 'Total Withdrawn Lifetime',
     };
     const fundLabel = targetFundNames[targetFund] || 'Available Balance';
+    const cleanReason = reason.trim().slice(0, 500);
 
     const adjustmentRecord: BalanceAdjustment = {
       id: adjId,
       userId,
-      userName: targetUser.name,
-      userEmail: targetUser.email,
+      userName: targetUser.name.slice(0, 100),
+      userEmail: targetUser.email.slice(0, 150),
       type,
       targetFund,
       previousBalance: prevBal,
       adjustmentAmount: delta,
       newBalance: newBal,
-      reason: reason.trim(),
+      reason: cleanReason,
       adminName: 'Super Admin',
       timestamp: nowIso,
     };
 
-    // Update user fund in state
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === userId) {
-          return {
-            ...u,
-            [targetFund]: newBal,
-            ...(targetFund === 'availableBalance' && type === 'increase'
-              ? { totalDeposited: Math.round((u.totalDeposited + amount) * 100) / 100 }
-              : {}),
-          };
-        }
-        return u;
+    const userUpdates: Record<string, unknown> = {
+      [targetFund]: newBal,
+      updatedAt: serverTimestamp(),
+    };
+    if (targetFund === 'availableBalance' && type === 'increase') {
+      userUpdates.totalDeposited = Math.round((targetUser.totalDeposited + amount) * 100) / 100;
+    }
+
+    const batch = writeBatch(db);
+    batch.update(doc(db, 'users', userId), userUpdates);
+    batch.set(
+      doc(db, 'adjustments', adjId),
+      cleanUndefined({
+        ...adjustmentRecord,
+        createdAt: serverTimestamp(),
       })
     );
+    batch
+      .commit()
+      .catch((err) => handleFirestoreError(err, OperationType.WRITE, `adjustments/${adjId}`));
 
-    // Save to adjustments ledger
-    setAdjustments((prev) => [adjustmentRecord, ...prev]);
-
-    // Send notification to user
     const actionDesc =
       type === 'increase'
         ? `credited ₹${amount.toLocaleString('en-IN')}`
@@ -990,24 +1427,20 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
         ? `debited ₹${amount.toLocaleString('en-IN')}`
         : `set to ₹${amount.toLocaleString('en-IN')}`;
 
-    sendNotification(
+    writeNotificationDoc(
       userId,
       `${fundLabel} Adjustment`,
-      `Super Admin ${actionDesc} for ${fundLabel}. Reason: "${reason.trim()}". Updated value: ₹${newBal.toLocaleString('en-IN')}.`,
+      `Super Admin ${actionDesc} for ${fundLabel}. Reason: "${cleanReason}". Updated value: ₹${newBal.toLocaleString(
+        'en-IN'
+      )}.`,
       'balance'
     );
 
-    // Add immutable admin audit log
-    const newLog: AdminLog = {
-      id: `log_${Date.now()}`,
-      timestamp: nowIso,
-      adminName: 'Super Admin',
-      action: 'FUNDS_ADJUSTMENT',
-      targetId: userId,
-      details: `${type.toUpperCase()} ${fundLabel} for ${targetUser.name} (${userId}). Previous: ₹${prevBal} -> New: ₹${newBal}. Reason: "${reason.trim()}".`,
-      ipAddress: '103.21.244.18',
-    };
-    setAdminLogs((prev) => [newLog, ...prev]);
+    writeAdminLogDoc(
+      'FUNDS_ADJUSTMENT',
+      `${type.toUpperCase()} ${fundLabel} for ${targetUser.name} (${userId}). Previous: ₹${prevBal} -> New: ₹${newBal}. Reason: "${cleanReason}".`,
+      userId
+    );
 
     return { success: true, adjustment: adjustmentRecord };
   };
@@ -1015,80 +1448,81 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // Super Admin: Update Fee Configuration
   const updateFeeConfig = (newConfig: Partial<FeeConfiguration>) => {
     sound.playSuccess();
-    setFeeConfig((prev) => ({ ...prev, ...newConfig }));
-    const newLog: AdminLog = {
-      id: `log_${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      adminName: 'Super Admin',
-      action: 'FEE_CONFIG_UPDATED',
-      details: `Updated platform fee policy: ${JSON.stringify(newConfig)}`,
-      ipAddress: '103.21.244.18',
+    const merged: FeeConfiguration = {
+      ...feeConfig,
+      ...newConfig,
     };
-    setAdminLogs((prev) => [newLog, ...prev]);
+    setDoc(doc(db, 'config', 'fees'), {
+      ...merged,
+      updatedAt: serverTimestamp(),
+    }).catch((err) => handleFirestoreError(err, OperationType.WRITE, 'config/fees'));
+
+    writeAdminLogDoc('FEE_CONFIG_UPDATED', `Updated platform fee policy: ${JSON.stringify(newConfig)}`);
   };
 
   // Super Admin: Toggle Emergency Killswitch
   const toggleWithdrawalsEnabled = (enabled?: boolean, notice?: string) => {
     sound.playWarning();
     const nextVal = enabled !== undefined ? enabled : !systemConfig.withdrawalsEnabled;
-    setSystemConfig((prev) => ({
-      ...prev,
-      withdrawalsEnabled: nextVal,
-      maintenanceNotice: notice !== undefined ? notice : prev.maintenanceNotice,
-    }));
+    const nextNotice = (notice !== undefined ? notice : systemConfig.maintenanceNotice || '').slice(0, 500);
 
-    const newLog: AdminLog = {
-      id: `log_${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      adminName: 'Super Admin',
-      action: nextVal ? 'ENABLE_WITHDRAWALS' : 'EMERGENCY_PAUSE_WITHDRAWALS',
-      details: `Platform withdrawal status set to ${nextVal ? 'ENABLED' : 'PAUSED'}. Notice: "${notice || 'None'}".`,
-      ipAddress: '103.21.244.18',
-    };
-    setAdminLogs((prev) => [newLog, ...prev]);
+    setDoc(
+      doc(db, 'config', 'system'),
+      cleanUndefined({
+        ...systemConfig,
+        withdrawalsEnabled: nextVal,
+        maintenanceNotice: nextNotice,
+        updatedAt: serverTimestamp(),
+      })
+    ).catch((err) => handleFirestoreError(err, OperationType.WRITE, 'config/system'));
+
+    writeAdminLogDoc(
+      nextVal ? 'ENABLE_WITHDRAWALS' : 'EMERGENCY_PAUSE_WITHDRAWALS',
+      `Platform withdrawal status set to ${nextVal ? 'ENABLED' : 'PAUSED'}. Notice: "${nextNotice || 'None'}".`
+    );
   };
 
   // Super Admin: Toggle Payment Method
   const togglePaymentMethod = (id: string) => {
     sound.playClick();
-    setSystemConfig((prev) => ({
-      ...prev,
-      paymentMethods: prev.paymentMethods.map((m) =>
-        m.id === id ? { ...m, enabled: !m.enabled } : m
-      ),
-    }));
+    const nextMethods = systemConfig.paymentMethods.map((m) =>
+      m.id === id ? { ...m, enabled: !m.enabled } : m
+    );
+    setDoc(
+      doc(db, 'config', 'system'),
+      cleanUndefined({
+        ...systemConfig,
+        paymentMethods: nextMethods,
+        updatedAt: serverTimestamp(),
+      })
+    ).catch((err) => handleFirestoreError(err, OperationType.WRITE, 'config/system'));
   };
 
   // Super Admin: Freeze/Unfreeze account
   const toggleUserFrozenState = (userId: string) => {
     sound.playWarning();
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === userId) {
-          const newState = !u.isFrozen;
-          const logItem: AdminLog = {
-            id: `log_${Date.now()}`,
-            timestamp: new Date().toISOString(),
-            adminName: 'Super Admin',
-            action: newState ? 'FREEZE_USER_ACCOUNT' : 'UNFREEZE_USER_ACCOUNT',
-            details: `Account for ${u.name} (${u.email}) was ${newState ? 'FROZEN' : 'RESTORED'}.`,
-            ipAddress: '103.21.244.18',
-          };
-          setAdminLogs((logs) => [logItem, ...logs]);
+    const targetUser = users.find((u) => u.id === userId);
+    if (!targetUser) return;
+    const newState = !targetUser.isFrozen;
 
-          sendNotification(
-            userId,
-            newState ? 'Account Restricted' : 'Account Restored',
-            newState
-              ? 'Your account has been temporarily restricted by compliance. Please contact support.'
-              : 'Your account restrictions have been cleared. All payout features are active.',
-            'security'
-          );
+    updateDoc(doc(db, 'users', userId), {
+      isFrozen: newState,
+      updatedAt: serverTimestamp(),
+    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `users/${userId}`));
 
-          return { ...u, isFrozen: newState };
-        }
-        return u;
-      })
+    writeAdminLogDoc(
+      newState ? 'FREEZE_USER_ACCOUNT' : 'UNFREEZE_USER_ACCOUNT',
+      `Account for ${targetUser.name} (${targetUser.email}) was ${newState ? 'FROZEN' : 'RESTORED'}.`,
+      userId
+    );
+
+    writeNotificationDoc(
+      userId,
+      newState ? 'Account Restricted' : 'Account Restored',
+      newState
+        ? 'Your account has been temporarily restricted by compliance. Please contact support.'
+        : 'Your account restrictions have been cleared. All payout features are active.',
+      'security'
     );
   };
 
@@ -1105,8 +1539,9 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
 
     if (target.id === currentUserId) {
-      // Find fallback user if current user is being deleted
-      const fallback = users.find((u) => u.id !== userId && u.role === 'user') || users.find((u) => u.role === 'admin');
+      const fallback =
+        users.find((u) => u.id !== userId && u.role === 'user') ||
+        users.find((u) => u.role === 'admin');
       if (fallback) {
         setCurrentUserId(fallback.id);
       }
@@ -1114,26 +1549,22 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     sound.playWarning();
 
-    // Remove user
-    setUsers((prev) => prev.filter((u) => u.id !== userId));
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'users', userId));
+    withdrawals.filter((w) => w.userId === userId).forEach((w) => batch.delete(doc(db, 'withdrawals', w.id)));
+    notifications.filter((n) => n.userId === userId).forEach((n) => batch.delete(doc(db, 'notifications', n.id)));
 
-    // Cleanup associated pending/active withdrawal records
-    setWithdrawals((prev) => prev.filter((w) => w.userId !== userId));
+    batch
+      .commit()
+      .catch((err) => handleFirestoreError(err, OperationType.DELETE, `users/${userId}`));
 
-    // Cleanup notifications
-    setNotifications((prev) => prev.filter((n) => n.userId !== userId));
-
-    // Immutable administrative audit log entry
-    const logItem: AdminLog = {
-      id: `log_${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      adminName: 'Super Admin',
-      action: 'DELETE_USER_PERMANENT',
-      targetId: userId,
-      details: `Permanently removed user account ${target.name} (${target.email}, ID: ${userId}). Remaining wallet balance ₹${target.availableBalance.toLocaleString('en-IN')} removed from system.`,
-      ipAddress: '103.21.244.18',
-    };
-    setAdminLogs((logs) => [logItem, ...logs]);
+    writeAdminLogDoc(
+      'DELETE_USER_PERMANENT',
+      `Permanently removed user account ${target.name} (${target.email}, ID: ${userId}). Remaining wallet balance ₹${target.availableBalance.toLocaleString(
+        'en-IN'
+      )} removed from system.`,
+      userId
+    );
 
     return { success: true };
   };
@@ -1141,24 +1572,41 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // Update Profile
   const updateUserProfile = (userId: string, updates: Partial<User>) => {
     sound.playSuccess();
-    setUsers((prev) =>
-      prev.map((u) => (u.id === userId ? { ...u, ...updates } : u))
+    const safeUpdates: Record<string, unknown> = {
+      updatedAt: serverTimestamp(),
+    };
+    if (updates.name !== undefined) safeUpdates.name = updates.name.slice(0, 100);
+    if (updates.phone !== undefined) safeUpdates.phone = updates.phone.slice(0, 30);
+    if (updates.address !== undefined) safeUpdates.address = updates.address.slice(0, 300);
+    if (updates.panNumber !== undefined) safeUpdates.panNumber = updates.panNumber.slice(0, 20);
+    if (updates.avatarUrl !== undefined) safeUpdates.avatarUrl = updates.avatarUrl.slice(0, 500);
+
+    updateDoc(doc(db, 'users', userId), safeUpdates).catch((err) =>
+      handleFirestoreError(err, OperationType.UPDATE, `users/${userId}`)
     );
-    sendNotification(userId, 'Profile Updated', 'Your personal account profile details have been updated.', 'system');
+    writeNotificationDoc(
+      userId,
+      'Profile Updated',
+      'Your personal account profile details have been updated.',
+      'system'
+    );
   };
 
-  // Register new demo user
+  // Register new user (Admin creates managed customer wallet in live Firestore)
   const registerNewUser = (name: string, email: string, phone: string) => {
     if (!name || !email || !phone) {
       return { success: false, error: 'Name, email, and phone are required.' };
+    }
+    if (!isAdminAccount) {
+      return { success: false, error: 'Only authorized administrators can provision additional customer accounts.' };
     }
     sound.playSuccess();
     const newId = `usr_${Date.now().toString().slice(-6)}`;
     const newUser: User = {
       id: newId,
-      name,
-      email,
-      phone,
+      name: name.slice(0, 100),
+      email: email.slice(0, 150),
+      phone: phone.slice(0, 30),
       role: 'user',
       kycStatus: 'pending',
       availableBalance: 25000.0,
@@ -1170,8 +1618,15 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       registeredAt: new Date().toISOString(),
       bankBeneficiaries: [],
       upiBeneficiaries: [],
+      isFrozen: false,
     };
-    setUsers((prev) => [...prev, newUser]);
+
+    setDoc(doc(db, 'users', newId), {
+      ...sanitizeUserForWrite(newUser),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    }).catch((err) => handleFirestoreError(err, OperationType.CREATE, `users/${newId}`));
+
     setCurrentUserId(newId);
     return { success: true, user: newUser };
   };
@@ -1183,17 +1638,11 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       ...beneficiary,
       id: `bnk_${Date.now()}`,
     };
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === currentUser.id) {
-          return {
-            ...u,
-            bankBeneficiaries: [newBeneficiary, ...u.bankBeneficiaries],
-          };
-        }
-        return u;
-      })
-    );
+    const updatedList = [newBeneficiary, ...currentUser.bankBeneficiaries].slice(0, 10);
+    updateDoc(doc(db, 'users', currentUser.id), {
+      bankBeneficiaries: updatedList,
+      updatedAt: serverTimestamp(),
+    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `users/${currentUser.id}`));
   };
 
   const addUpiBeneficiary = (beneficiary: Omit<UpiBeneficiary, 'id'>) => {
@@ -1202,17 +1651,11 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       ...beneficiary,
       id: `upi_${Date.now()}`,
     };
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.id === currentUser.id) {
-          return {
-            ...u,
-            upiBeneficiaries: [newBeneficiary, ...u.upiBeneficiaries],
-          };
-        }
-        return u;
-      })
-    );
+    const updatedList = [newBeneficiary, ...currentUser.upiBeneficiaries].slice(0, 10);
+    updateDoc(doc(db, 'users', currentUser.id), {
+      upiBeneficiaries: updatedList,
+      updatedAt: serverTimestamp(),
+    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `users/${currentUser.id}`));
   };
 
   const deletePayoutAccount = (
@@ -1228,61 +1671,43 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
 
     let deletedIdentifier = accountId;
+    const updates: Record<string, unknown> = {
+      updatedAt: serverTimestamp(),
+    };
 
     if (accountType === 'bank') {
       const bnk = targetUser.bankBeneficiaries.find((b) => b.id === accountId);
       if (bnk) deletedIdentifier = `${bnk.bankName} (•••• ${bnk.accountNumber.slice(-4)})`;
-      setUsers((prev) =>
-        prev.map((u) => {
-          if (u.id === userId) {
-            const updatedBanks = u.bankBeneficiaries.filter((b) => b.id !== accountId);
-            // If the deleted one was default, set another as default
-            if (updatedBanks.length > 0 && !updatedBanks.some((b) => b.isDefault)) {
-              updatedBanks[0].isDefault = true;
-            }
-            return {
-              ...u,
-              bankBeneficiaries: updatedBanks,
-            };
-          }
-          return u;
-        })
-      );
+      const updatedBanks = targetUser.bankBeneficiaries
+        .filter((b) => b.id !== accountId)
+        .map((b) => ({ ...b }));
+      if (updatedBanks.length > 0 && !updatedBanks.some((b) => b.isDefault)) {
+        updatedBanks[0].isDefault = true;
+      }
+      updates.bankBeneficiaries = updatedBanks.slice(0, 10);
     } else {
       const upi = targetUser.upiBeneficiaries.find((b) => b.id === accountId);
       if (upi) deletedIdentifier = upi.upiId;
-      setUsers((prev) =>
-        prev.map((u) => {
-          if (u.id === userId) {
-            const updatedUpi = u.upiBeneficiaries.filter((b) => b.id !== accountId);
-            if (updatedUpi.length > 0 && !updatedUpi.some((b) => b.isDefault)) {
-              updatedUpi[0].isDefault = true;
-            }
-            return {
-              ...u,
-              upiBeneficiaries: updatedUpi,
-            };
-          }
-          return u;
-        })
-      );
+      const updatedUpi = targetUser.upiBeneficiaries
+        .filter((b) => b.id !== accountId)
+        .map((b) => ({ ...b }));
+      if (updatedUpi.length > 0 && !updatedUpi.some((b) => b.isDefault)) {
+        updatedUpi[0].isDefault = true;
+      }
+      updates.upiBeneficiaries = updatedUpi.slice(0, 10);
     }
 
-    // Add immutable Admin Audit Log
-    const nowIso = new Date().toISOString();
-    const newLog: AdminLog = {
-      id: `log_del_payout_${Date.now()}`,
-      timestamp: nowIso,
-      adminName: 'Super Admin',
-      action: 'UPDATE_USER',
-      targetId: userId,
-      details: `Admin deleted ${accountType.toUpperCase()} payout account "${deletedIdentifier}" for user ${targetUser.name} (${userId}). Reason: ${reason}`,
-      ipAddress: '103.21.244.18',
-    };
-    setAdminLogs((prev) => [newLog, ...prev]);
+    updateDoc(doc(db, 'users', userId), updates).catch((err) =>
+      handleFirestoreError(err, OperationType.UPDATE, `users/${userId}`)
+    );
 
-    // Send user notification
-    sendNotification(
+    writeAdminLogDoc(
+      'UPDATE_USER',
+      `Admin deleted ${accountType.toUpperCase()} payout account "${deletedIdentifier}" for user ${targetUser.name} (${userId}). Reason: ${reason}`,
+      userId
+    );
+
+    writeNotificationDoc(
       userId,
       'Payout Account Removed',
       `Your linked payout account (${deletedIdentifier}) was removed by Compliance/Admin. Reason: ${reason}. You can link a new verified account anytime.`,
@@ -1294,47 +1719,69 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   // Notifications
   const markNotificationRead = (id: string) => {
-    setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, read: true } : n))
-    );
+    updateDoc(doc(db, 'notifications', id), {
+      read: true,
+      updatedAt: serverTimestamp(),
+    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `notifications/${id}`));
   };
 
   const markAllNotificationsRead = (userId: string) => {
     sound.playClick();
-    setNotifications((prev) =>
-      prev.map((n) => (n.userId === userId ? { ...n, read: true } : n))
-    );
+    const targets = notifications.filter((n) => n.userId === userId && !n.read);
+    if (targets.length === 0) return;
+    const batch = writeBatch(db);
+    targets.forEach((n) => {
+      batch.update(doc(db, 'notifications', n.id), {
+        read: true,
+        updatedAt: serverTimestamp(),
+      });
+    });
+    batch.commit().catch((err) => handleFirestoreError(err, OperationType.UPDATE, 'notifications'));
   };
 
   const clearAllNotifications = (userId: string) => {
     sound.playClick();
-    setNotifications((prev) => prev.filter((n) => n.userId !== userId));
+    const targets = notifications.filter((n) => n.userId === userId);
+    if (targets.length === 0) return;
+    const batch = writeBatch(db);
+    targets.forEach((n) => batch.delete(doc(db, 'notifications', n.id)));
+    batch.commit().catch((err) => handleFirestoreError(err, OperationType.DELETE, 'notifications'));
   };
 
-  // Reset to default seed
+  // Reset to default seed (Admin only)
   const resetToDefault = () => {
+    if (!isAdminAccount) return;
     sound.playWarning();
-    setUsers(INITIAL_USERS);
-    setWithdrawals(INITIAL_WITHDRAWALS);
-    setFeeConfig(INITIAL_FEE_CONFIG);
-    setAdminLogs(INITIAL_ADMIN_LOGS);
-    setAdjustments(INITIAL_ADJUSTMENTS);
-    setNotifications(INITIAL_NOTIFICATIONS);
-    setSystemConfig(INITIAL_SYSTEM_CONFIG);
-    setCurrentUserId('usr_vikram_89');
-    setCurrentRole('user');
-    localStorage.removeItem(`${STORAGE_KEY_PREFIX}users`);
-    localStorage.removeItem(`${STORAGE_KEY_PREFIX}withdrawals`);
-    localStorage.removeItem(`${STORAGE_KEY_PREFIX}feeConfig`);
-    localStorage.removeItem(`${STORAGE_KEY_PREFIX}adminLogs`);
-    localStorage.removeItem(`${STORAGE_KEY_PREFIX}adjustments`);
-    localStorage.removeItem(`${STORAGE_KEY_PREFIX}notifications`);
-    localStorage.removeItem(`${STORAGE_KEY_PREFIX}systemConfig`);
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'config', 'fees'), {
+      ...INITIAL_FEE_CONFIG,
+      updatedAt: serverTimestamp(),
+    });
+    batch.set(doc(db, 'config', 'system'), {
+      ...INITIAL_SYSTEM_CONFIG,
+      updatedAt: serverTimestamp(),
+    });
+    INITIAL_USERS.forEach((seedUser) => {
+      batch.set(doc(db, 'users', seedUser.id), {
+        ...sanitizeUserForWrite(seedUser),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    });
+    batch.commit().catch((err) => handleFirestoreError(err, OperationType.WRITE, 'resetToDefault'));
+    writeAdminLogDoc('RESET_PLATFORM_DEFAULTS', 'Restored default fee configuration and demo user wallets.');
   };
 
   return (
     <FintechContext.Provider
       value={{
+        firebaseUser,
+        authReady,
+        dbLoading,
+        isAdminAccount,
+        authError,
+        signInWithGoogle,
+        logout,
         currentUser,
         users,
         withdrawals,

@@ -1,0 +1,598 @@
+{
+  "entities": {
+    "AdminRole": {
+      "title": "AdminRole",
+      "description": "Authorized Super Admin role record keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the administrator.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified email address of the administrator.",
+          "minLength": 3,
+          "maxLength": 150
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Customer or administrator financial account, KYC details, wallet balances, and bounded payout beneficiary lists.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "User document ID matching Firebase Auth UID or managed customer ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Full legal display name.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Customer email address (PII).",
+          "minLength": 3,
+          "maxLength": 150
+        },
+        "phone": {
+          "type": "string",
+          "description": "Customer phone number (PII).",
+          "minLength": 5,
+          "maxLength": 30
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "admin"],
+          "description": "Access role; must be 'user' on self-registration."
+        },
+        "kycStatus": {
+          "type": "string",
+          "enum": ["verified", "pending", "unverified"],
+          "description": "KYC verification status."
+        },
+        "avatarUrl": {
+          "type": "string",
+          "description": "Profile avatar URL.",
+          "maxLength": 500
+        },
+        "availableBalance": {
+          "type": "number",
+          "description": "Available wallet balance in INR."
+        },
+        "totalDeposited": {
+          "type": "number",
+          "description": "Cumulative deposited amount in INR."
+        },
+        "totalWithdrawn": {
+          "type": "number",
+          "description": "Cumulative settled withdrawals in INR."
+        },
+        "pendingWithdrawals": {
+          "type": "number",
+          "description": "Reserved amount for in-flight withdrawals in INR."
+        },
+        "dailyWithdrawalLimit": {
+          "type": "number",
+          "description": "Daily withdrawal limit in INR."
+        },
+        "withdrawnToday": {
+          "type": "number",
+          "description": "Amount withdrawn today in INR."
+        },
+        "registeredAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO registration timestamp."
+        },
+        "bankBeneficiaries": {
+          "type": "array",
+          "description": "Bounded list (max 10) of linked bank accounts."
+        },
+        "upiBeneficiaries": {
+          "type": "array",
+          "description": "Bounded list (max 10) of linked UPI VPAs."
+        },
+        "isFrozen": {
+          "type": "boolean",
+          "description": "Whether compliance has frozen withdrawals for this user."
+        },
+        "address": {
+          "type": "string",
+          "description": "Registered physical address (PII).",
+          "maxLength": 300
+        },
+        "panNumber": {
+          "type": "string",
+          "description": "PAN tax identifier (PII).",
+          "maxLength": 20
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp."
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "email",
+        "phone",
+        "role",
+        "kycStatus",
+        "availableBalance",
+        "totalDeposited",
+        "totalWithdrawn",
+        "pendingWithdrawals",
+        "dailyWithdrawalLimit",
+        "withdrawnToday",
+        "registeredAt",
+        "bankBeneficiaries",
+        "upiBeneficiaries",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WithdrawalRequest": {
+      "title": "WithdrawalRequest",
+      "description": "Financial withdrawal request record with fee breakdown, destination details, and bounded status timeline.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique transaction ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner user ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userName": {
+          "type": "string",
+          "description": "Customer display name.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "userEmail": {
+          "type": "string",
+          "format": "email",
+          "description": "Customer email address.",
+          "minLength": 3,
+          "maxLength": 150
+        },
+        "amount": {
+          "type": "number",
+          "description": "Gross withdrawal amount in INR."
+        },
+        "feeAmount": {
+          "type": "number",
+          "description": "Platform processing fee in INR."
+        },
+        "gstAmount": {
+          "type": "number",
+          "description": "GST on platform fee in INR."
+        },
+        "netPayableAmount": {
+          "type": "number",
+          "description": "Net payout amount after fees and tax."
+        },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["upi", "bank_transfer"],
+          "description": "Payout rail type."
+        },
+        "paymentDetails": {
+          "type": "object",
+          "description": "Destination UPI or Bank account details."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "approved", "processing", "completed", "failed", "rejected"],
+          "description": "Current settlement status."
+        },
+        "utrNumber": {
+          "type": "string",
+          "description": "Bank UTR settlement reference.",
+          "maxLength": 64
+        },
+        "rejectionReason": {
+          "type": "string",
+          "description": "Compliance rejection reason.",
+          "maxLength": 500
+        },
+        "statusTimeline": {
+          "type": "array",
+          "description": "Bounded list (max 20) of status timeline events."
+        },
+        "referenceNumber": {
+          "type": "string",
+          "description": "Internal gateway channel reference.",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "completedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Settlement completion ISO timestamp."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp."
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "userName",
+        "userEmail",
+        "amount",
+        "feeAmount",
+        "gstAmount",
+        "netPayableAmount",
+        "paymentMethod",
+        "paymentDetails",
+        "status",
+        "statusTimeline",
+        "referenceNumber",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "FeeConfiguration": {
+      "title": "FeeConfiguration",
+      "description": "Global platform withdrawal fee and threshold policy stored at config/fees.",
+      "type": "object",
+      "properties": {
+        "feeType": {
+          "type": "string",
+          "enum": ["flat", "percentage", "flat_plus_percent"],
+          "description": "Fee calculation mode."
+        },
+        "flatFee": {
+          "type": "number",
+          "description": "Flat fee in INR."
+        },
+        "percentageFee": {
+          "type": "number",
+          "description": "Percentage fee rate."
+        },
+        "gstRatePercent": {
+          "type": "number",
+          "description": "GST rate percentage."
+        },
+        "minWithdrawalAmount": {
+          "type": "number",
+          "description": "Minimum withdrawal amount."
+        },
+        "maxWithdrawalAmountPerTxn": {
+          "type": "number",
+          "description": "Maximum per-transaction withdrawal."
+        },
+        "dailyCeilingLimit": {
+          "type": "number",
+          "description": "Platform daily ceiling."
+        },
+        "freeWithdrawalsPerMonth": {
+          "type": "number",
+          "description": "Monthly free withdrawal allowance."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "feeType",
+        "flatFee",
+        "percentageFee",
+        "gstRatePercent",
+        "minWithdrawalAmount",
+        "maxWithdrawalAmountPerTxn",
+        "dailyCeilingLimit",
+        "freeWithdrawalsPerMonth",
+        "updatedAt"
+      ]
+    },
+    "SystemConfig": {
+      "title": "SystemConfig",
+      "description": "Global payout rail switches and maintenance banner stored at config/system.",
+      "type": "object",
+      "properties": {
+        "withdrawalsEnabled": {
+          "type": "boolean",
+          "description": "Global withdrawal killswitch."
+        },
+        "maintenanceNotice": {
+          "type": "string",
+          "description": "Optional maintenance notice banner.",
+          "maxLength": 500
+        },
+        "require2FA": {
+          "type": "boolean",
+          "description": "Whether 2FA OTP is enforced."
+        },
+        "paymentMethods": {
+          "type": "array",
+          "description": "Bounded list (max 10) of payment rail settings."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "withdrawalsEnabled",
+        "require2FA",
+        "paymentMethods",
+        "updatedAt"
+      ]
+    },
+    "BalanceAdjustment": {
+      "title": "BalanceAdjustment",
+      "description": "Admin-initiated ledger balance or quota adjustment audit record.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "userEmail": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 150
+        },
+        "type": {
+          "type": "string",
+          "enum": ["increase", "decrease", "set_fixed"]
+        },
+        "targetFund": {
+          "type": "string",
+          "enum": [
+            "availableBalance",
+            "dailyWithdrawalLimit",
+            "withdrawnToday",
+            "pendingWithdrawals",
+            "totalWithdrawn"
+          ]
+        },
+        "previousBalance": {
+          "type": "number"
+        },
+        "adjustmentAmount": {
+          "type": "number"
+        },
+        "newBalance": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 500
+        },
+        "adminName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "userName",
+        "userEmail",
+        "type",
+        "previousBalance",
+        "adjustmentAmount",
+        "newBalance",
+        "reason",
+        "adminName",
+        "timestamp",
+        "createdAt"
+      ]
+    },
+    "AdminLog": {
+      "title": "AdminLog",
+      "description": "Immutable administrative compliance audit log entry.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "adminName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "targetId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "details": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "ipAddress": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "timestamp",
+        "adminName",
+        "action",
+        "details",
+        "ipAddress",
+        "createdAt"
+      ]
+    },
+    "NotificationItem": {
+      "title": "NotificationItem",
+      "description": "In-app user notification for withdrawal, balance, or security events.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "type": {
+          "type": "string",
+          "enum": ["withdrawal", "balance", "security", "system"]
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "linkTxnId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "title",
+        "message",
+        "type",
+        "timestamp",
+        "read",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminRole" },
+      "description": "Authorized Super Admin role documents."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User financial profiles and linked beneficiaries; PII isolated to owner or admin."
+    },
+    "/withdrawals/{withdrawalId}": {
+      "schema": { "$ref": "#/entities/WithdrawalRequest" },
+      "description": "Customer withdrawal requests and settlement lifecycle."
+    },
+    "/config/{configId}": {
+      "schema": { "$ref": "#/entities/FeeConfiguration" },
+      "description": "Platform configuration documents ('fees' and 'system')."
+    },
+    "/adjustments/{adjustmentId}": {
+      "schema": { "$ref": "#/entities/BalanceAdjustment" },
+      "description": "Admin balance/quota adjustment audit records."
+    },
+    "/adminLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AdminLog" },
+      "description": "Immutable Super Admin compliance logs."
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/NotificationItem" },
+      "description": "User-scoped notifications."
+    }
+  }
+}

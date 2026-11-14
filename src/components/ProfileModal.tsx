@@ -1,17 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useFintech } from '../context/FintechContext';
 import { sound } from '../utils/audio';
 import {
   X,
   User as UserIcon,
   ShieldCheck,
-  Phone,
-  Mail,
-  CreditCard,
-  MapPin,
   Check,
   UserPlus,
   Trash2,
+  LogOut,
 } from 'lucide-react';
 
 interface ProfileModalProps {
@@ -20,7 +17,16 @@ interface ProfileModalProps {
 }
 
 export const ProfileModal: React.FC<ProfileModalProps> = ({ isOpen, onClose }) => {
-  const { currentUser, users, switchUser, updateUserProfile, registerNewUser, deleteUser } = useFintech();
+  const {
+    currentUser,
+    users,
+    isAdminAccount,
+    switchUser,
+    updateUserProfile,
+    registerNewUser,
+    deleteUser,
+    logout,
+  } = useFintech();
 
   const [activeTab, setActiveTab] = useState<'profile' | 'switch' | 'register'>('profile');
 
@@ -29,14 +35,25 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({ isOpen, onClose }) =
   const [phone, setPhone] = useState(currentUser.phone);
   const [email, setEmail] = useState(currentUser.email);
   const [panNumber, setPanNumber] = useState(currentUser.panNumber || 'ABCDE1234F');
-  const [address, setAddress] = useState(currentUser.address || '402, High Street Towers, Nariman Point, Mumbai 400021');
+  const [address, setAddress] = useState(
+    currentUser.address || '402, High Street Towers, Nariman Point, Mumbai 400021'
+  );
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // New registration fields
   const [newName, setNewName] = useState('');
   const [newEmail, setNewEmail] = useState('');
   const [newPhone, setNewPhone] = useState('');
   const [regError, setRegError] = useState('');
+
+  useEffect(() => {
+    setName(currentUser.name);
+    setPhone(currentUser.phone);
+    setEmail(currentUser.email);
+    setPanNumber(currentUser.panNumber || 'ABCDE1234F');
+    setAddress(currentUser.address || '402, High Street Towers, Nariman Point, Mumbai 400021');
+  }, [currentUser, isOpen]);
 
   if (!isOpen) return null;
 
@@ -93,52 +110,54 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({ isOpen, onClose }) =
         </div>
 
         {/* Tab switcher */}
-        <div className="flex gap-2 p-1 bg-slate-100 dark:bg-slate-800/80 rounded-xl my-4 text-xs font-semibold">
-          <button
-            onClick={() => {
-              sound.playClick();
-              setActiveTab('profile');
-            }}
-            className={`flex-1 py-2 rounded-lg transition-colors cursor-pointer ${
-              activeTab === 'profile'
-                ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs'
-                : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
-            }`}
-          >
-            Profile & KYC
-          </button>
-          <button
-            onClick={() => {
-              sound.playClick();
-              setActiveTab('switch');
-            }}
-            className={`flex-1 py-2 rounded-lg transition-colors cursor-pointer ${
-              activeTab === 'switch'
-                ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs'
-                : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
-            }`}
-          >
-            Switch Account ({users.filter((u) => u.role === 'user').length})
-          </button>
-          <button
-            onClick={() => {
-              sound.playClick();
-              setActiveTab('register');
-            }}
-            className={`flex-1 py-2 rounded-lg transition-colors cursor-pointer flex items-center justify-center gap-1 ${
-              activeTab === 'register'
-                ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs'
-                : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
-            }`}
-          >
-            <UserPlus className="w-3.5 h-3.5" />
-            <span>Register</span>
-          </button>
-        </div>
+        {isAdminAccount && (
+          <div className="flex gap-2 p-1 bg-slate-100 dark:bg-slate-800/80 rounded-xl my-4 text-xs font-semibold">
+            <button
+              onClick={() => {
+                sound.playClick();
+                setActiveTab('profile');
+              }}
+              className={`flex-1 py-2 rounded-lg transition-colors cursor-pointer ${
+                activeTab === 'profile'
+                  ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs'
+                  : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
+              }`}
+            >
+              Profile & KYC
+            </button>
+            <button
+              onClick={() => {
+                sound.playClick();
+                setActiveTab('switch');
+              }}
+              className={`flex-1 py-2 rounded-lg transition-colors cursor-pointer ${
+                activeTab === 'switch'
+                  ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs'
+                  : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
+              }`}
+            >
+              Switch Account ({users.filter((u) => u.role === 'user').length})
+            </button>
+            <button
+              onClick={() => {
+                sound.playClick();
+                setActiveTab('register');
+              }}
+              className={`flex-1 py-2 rounded-lg transition-colors cursor-pointer flex items-center justify-center gap-1 ${
+                activeTab === 'register'
+                  ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-xs'
+                  : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white'
+              }`}
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span>Register</span>
+            </button>
+          </div>
+        )}
 
         {/* Tab 1: Profile View & Edit */}
         {activeTab === 'profile' && (
-          <form onSubmit={handleSaveProfile} className="space-y-4 text-xs">
+          <form onSubmit={handleSaveProfile} className="space-y-4 text-xs mt-4">
             {/* Identity Card */}
             <div className="flex items-center gap-4 p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800">
               <div className="w-12 h-12 rounded-full overflow-hidden border border-slate-300 dark:border-slate-700 bg-slate-200 dark:bg-slate-800 shrink-0">
@@ -165,7 +184,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({ isOpen, onClose }) =
                     <ShieldCheck className="w-3 h-3" />
                     <span>KYC Verified</span>
                   </span>
-                  <span className="text-[10px] text-slate-400 font-mono">ID: {currentUser.id}</span>
+                  <span className="text-[10px] text-slate-400 font-mono truncate">ID: {currentUser.id}</span>
                 </div>
               </div>
             </div>
@@ -229,7 +248,18 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({ isOpen, onClose }) =
               </div>
             )}
 
-            <div className="pt-2 flex justify-end">
+            <div className="pt-2 flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  onClose();
+                  await logout();
+                }}
+                className="px-4 py-2.5 border border-rose-200 dark:border-rose-900/60 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 rounded-xl font-semibold transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Sign Out</span>
+              </button>
               <button
                 type="submit"
                 className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-semibold shadow-xs transition-colors cursor-pointer"
@@ -240,13 +270,13 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({ isOpen, onClose }) =
           </form>
         )}
 
-        {/* Tab 2: Switch Demo User */}
-        {activeTab === 'switch' && (
+        {/* Tab 2: Switch Managed Customer Wallet (Admins only) */}
+        {isAdminAccount && activeTab === 'switch' && (
           <div className="space-y-3">
             <p className="text-xs text-slate-500">
-              Select any pre-configured customer wallet to test balances, history, and status updates:
+              Select any live customer wallet to inspect balances, history, and status updates:
             </p>
-            <div className="space-y-2">
+            <div className="space-y-2 max-h-80 overflow-y-auto">
               {users
                 .filter((u) => u.role === 'user')
                 .map((u) => (
@@ -288,20 +318,32 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({ isOpen, onClose }) =
                         <span className="text-[10px] text-slate-400 capitalize">{u.kycStatus} KYC</span>
                       </div>
                       {users.filter((item) => item.role === 'user').length > 1 && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            sound.playWarning();
-                            if (window.confirm(`Are you sure you want to delete user account "${u.name}"?`)) {
+                        confirmDeleteId === u.id ? (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
                               deleteUser(u.id);
-                            }
-                          }}
-                          className="p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
-                          title="Delete this demo user account"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                              setConfirmDeleteId(null);
+                            }}
+                            className="px-2 py-1 bg-rose-600 text-white text-[10px] font-semibold rounded-md cursor-pointer"
+                          >
+                            Confirm
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              sound.playWarning();
+                              setConfirmDeleteId(u.id);
+                            }}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
+                            title="Delete this user account"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )
                       )}
                     </div>
                   </div>
@@ -310,11 +352,11 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({ isOpen, onClose }) =
           </div>
         )}
 
-        {/* Tab 3: Register New User */}
-        {activeTab === 'register' && (
+        {/* Tab 3: Register New User (Admins only) */}
+        {isAdminAccount && activeTab === 'register' && (
           <form onSubmit={handleRegister} className="space-y-3 text-xs">
             <p className="text-xs text-slate-500">
-              Create a new customer account initialized with ₹25,000 wallet balance to test real-time transactions.
+              Create a new customer account initialized with ₹25,000 wallet balance in Cloud Firestore.
             </p>
 
             <div>
@@ -366,7 +408,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({ isOpen, onClose }) =
                 type="submit"
                 className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-semibold shadow-xs transition-colors cursor-pointer"
               >
-                Register & Sign In
+                Create Account
               </button>
             </div>
           </form>

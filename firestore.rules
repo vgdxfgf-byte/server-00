@@ -1,0 +1,413 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Global Security Primitives
+    // =========================================================================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'vgdxfgf@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isVerifiedUser() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // =========================================================================
+    // Validation Blueprints (No existing() / diff() inside)
+    // =========================================================================
+    function isValidAdminRole(data, adminId) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'createdAt']) &&
+        isValidId(data.uid) &&
+        data.uid == adminId &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 150 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidUser(data, userId) {
+      return data.keys().hasAll([
+          'id', 'name', 'email', 'phone', 'role', 'kycStatus',
+          'availableBalance', 'totalDeposited', 'totalWithdrawn',
+          'pendingWithdrawals', 'dailyWithdrawalLimit', 'withdrawnToday',
+          'registeredAt', 'bankBeneficiaries', 'upiBeneficiaries',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'name', 'email', 'phone', 'role', 'kycStatus', 'avatarUrl',
+          'availableBalance', 'totalDeposited', 'totalWithdrawn',
+          'pendingWithdrawals', 'dailyWithdrawalLimit', 'withdrawnToday',
+          'registeredAt', 'bankBeneficiaries', 'upiBeneficiaries',
+          'isFrozen', 'address', 'panNumber', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == userId &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 150 &&
+        data.phone is string && data.phone.size() >= 5 && data.phone.size() <= 30 &&
+        data.role in ['user', 'admin'] &&
+        data.kycStatus in ['verified', 'pending', 'unverified'] &&
+        (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 500)) &&
+        data.availableBalance is number && data.availableBalance >= 0 &&
+        data.totalDeposited is number && data.totalDeposited >= 0 &&
+        data.totalWithdrawn is number && data.totalWithdrawn >= 0 &&
+        data.pendingWithdrawals is number && data.pendingWithdrawals >= 0 &&
+        data.dailyWithdrawalLimit is number && data.dailyWithdrawalLimit >= 0 &&
+        data.withdrawnToday is number && data.withdrawnToday >= 0 &&
+        data.registeredAt is string && data.registeredAt.size() >= 10 && data.registeredAt.size() <= 50 &&
+        data.bankBeneficiaries is list && data.bankBeneficiaries.size() <= 10 &&
+        (data.bankBeneficiaries.size() == 0 || data.bankBeneficiaries[0] is map) &&
+        data.upiBeneficiaries is list && data.upiBeneficiaries.size() <= 10 &&
+        (data.upiBeneficiaries.size() == 0 || data.upiBeneficiaries[0] is map) &&
+        (!('isFrozen' in data) || data.isFrozen is bool) &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
+        (!('panNumber' in data) || (data.panNumber is string && data.panNumber.size() <= 20)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidWithdrawal(data, withdrawalId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'userName', 'userEmail', 'amount', 'feeAmount',
+          'gstAmount', 'netPayableAmount', 'paymentMethod', 'paymentDetails',
+          'status', 'statusTimeline', 'referenceNumber', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'userId', 'userName', 'userEmail', 'amount', 'feeAmount',
+          'gstAmount', 'netPayableAmount', 'paymentMethod', 'paymentDetails',
+          'status', 'utrNumber', 'rejectionReason', 'statusTimeline',
+          'referenceNumber', 'completedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == withdrawalId &&
+        isValidId(data.userId) &&
+        data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 100 &&
+        data.userEmail is string && data.userEmail.size() >= 3 && data.userEmail.size() <= 150 &&
+        data.amount is number && data.amount > 0 &&
+        data.feeAmount is number && data.feeAmount >= 0 &&
+        data.gstAmount is number && data.gstAmount >= 0 &&
+        data.netPayableAmount is number && data.netPayableAmount > 0 &&
+        data.netPayableAmount <= data.amount &&
+        data.paymentMethod in ['upi', 'bank_transfer'] &&
+        data.paymentDetails is map &&
+        data.status in ['pending', 'approved', 'processing', 'completed', 'failed', 'rejected'] &&
+        (!('utrNumber' in data) || (data.utrNumber is string && data.utrNumber.size() <= 64)) &&
+        (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500)) &&
+        data.statusTimeline is list && data.statusTimeline.size() >= 1 && data.statusTimeline.size() <= 20 &&
+        data.statusTimeline[0] is map &&
+        data.referenceNumber is string && data.referenceNumber.size() >= 1 && data.referenceNumber.size() <= 64 &&
+        (!('completedAt' in data) || (data.completedAt is string && data.completedAt.size() <= 50)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidFeeConfig(data) {
+      return data.keys().hasAll([
+          'feeType', 'flatFee', 'percentageFee', 'gstRatePercent',
+          'minWithdrawalAmount', 'maxWithdrawalAmountPerTxn',
+          'dailyCeilingLimit', 'freeWithdrawalsPerMonth', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'feeType', 'flatFee', 'percentageFee', 'gstRatePercent',
+          'minWithdrawalAmount', 'maxWithdrawalAmountPerTxn',
+          'dailyCeilingLimit', 'freeWithdrawalsPerMonth', 'updatedAt'
+        ]) &&
+        data.feeType in ['flat', 'percentage', 'flat_plus_percent'] &&
+        data.flatFee is number && data.flatFee >= 0 &&
+        data.percentageFee is number && data.percentageFee >= 0 && data.percentageFee <= 100 &&
+        data.gstRatePercent is number && data.gstRatePercent >= 0 && data.gstRatePercent <= 100 &&
+        data.minWithdrawalAmount is number && data.minWithdrawalAmount >= 0 &&
+        data.maxWithdrawalAmountPerTxn is number && data.maxWithdrawalAmountPerTxn >= data.minWithdrawalAmount &&
+        data.dailyCeilingLimit is number && data.dailyCeilingLimit >= data.minWithdrawalAmount &&
+        data.freeWithdrawalsPerMonth is number && data.freeWithdrawalsPerMonth >= 0 &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSystemConfig(data) {
+      return data.keys().hasAll([
+          'withdrawalsEnabled', 'require2FA', 'paymentMethods', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'withdrawalsEnabled', 'maintenanceNotice', 'require2FA', 'paymentMethods', 'updatedAt'
+        ]) &&
+        data.withdrawalsEnabled is bool &&
+        (!('maintenanceNotice' in data) || (data.maintenanceNotice is string && data.maintenanceNotice.size() <= 500)) &&
+        data.require2FA is bool &&
+        data.paymentMethods is list && data.paymentMethods.size() <= 10 &&
+        (data.paymentMethods.size() == 0 || data.paymentMethods[0] is map) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAdjustment(data, adjustmentId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'userName', 'userEmail', 'type',
+          'previousBalance', 'adjustmentAmount', 'newBalance',
+          'reason', 'adminName', 'timestamp', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'userId', 'userName', 'userEmail', 'type', 'targetFund',
+          'previousBalance', 'adjustmentAmount', 'newBalance',
+          'reason', 'adminName', 'timestamp', 'createdAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == adjustmentId &&
+        isValidId(data.userId) &&
+        data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 100 &&
+        data.userEmail is string && data.userEmail.size() >= 3 && data.userEmail.size() <= 150 &&
+        data.type in ['increase', 'decrease', 'set_fixed'] &&
+        (!('targetFund' in data) || data.targetFund in ['availableBalance', 'dailyWithdrawalLimit', 'withdrawnToday', 'pendingWithdrawals', 'totalWithdrawn']) &&
+        data.previousBalance is number && data.previousBalance >= 0 &&
+        data.adjustmentAmount is number && data.adjustmentAmount >= 0 &&
+        data.newBalance is number && data.newBalance >= 0 &&
+        data.reason is string && data.reason.size() >= 5 && data.reason.size() <= 500 &&
+        data.adminName is string && data.adminName.size() >= 1 && data.adminName.size() <= 100 &&
+        data.timestamp is string && data.timestamp.size() >= 10 && data.timestamp.size() <= 50 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidAdminLog(data, logId) {
+      return data.keys().hasAll([
+          'id', 'timestamp', 'adminName', 'action', 'details', 'ipAddress', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'timestamp', 'adminName', 'action', 'targetId', 'details', 'ipAddress', 'createdAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == logId &&
+        data.timestamp is string && data.timestamp.size() >= 10 && data.timestamp.size() <= 50 &&
+        data.adminName is string && data.adminName.size() >= 1 && data.adminName.size() <= 100 &&
+        data.action is string && data.action.size() >= 1 && data.action.size() <= 100 &&
+        (!('targetId' in data) || (data.targetId is string && data.targetId.size() <= 128)) &&
+        data.details is string && data.details.size() >= 1 && data.details.size() <= 1000 &&
+        data.ipAddress is string && data.ipAddress.size() >= 1 && data.ipAddress.size() <= 64 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidNotification(data, notificationId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'title', 'message', 'type', 'timestamp', 'read', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'userId', 'title', 'message', 'type', 'timestamp', 'read', 'linkTxnId', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == notificationId &&
+        isValidId(data.userId) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 500 &&
+        data.type in ['withdrawal', 'balance', 'security', 'system'] &&
+        data.timestamp is string && data.timestamp.size() >= 10 && data.timestamp.size() <= 50 &&
+        data.read is bool &&
+        (!('linkTxnId' in data) || (data.linkTxnId is string && data.linkTxnId.size() <= 128)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // Collection Match Blocks
+    // =========================================================================
+
+    // Boot-time connection check
+    match /test/connection {
+      allow get: if true;
+      allow list, write: if false;
+    }
+
+    // Authorized Admin Role Registry
+    match /admins/{adminId} {
+      allow get: if isVerifiedUser() && isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(adminId) && isValidAdminRole(incoming(), adminId) &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(adminId) && adminId != request.auth.uid;
+    }
+
+    // User Financial Profiles (Strict PII Isolation)
+    match /users/{userId} {
+      allow get: if isVerifiedUser() && isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin() || (isVerifiedUser() && resource.data.id == request.auth.uid);
+
+      allow create: if isVerifiedUser() && isValidId(userId) &&
+        isValidUser(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            isOwner(userId) &&
+            incoming().role == 'user' &&
+            incoming().kycStatus in ['pending', 'verified'] &&
+            (!('isFrozen' in incoming()) || incoming().isFrozen == false) &&
+            incoming().availableBalance <= 25000 &&
+            incoming().totalDeposited == incoming().availableBalance &&
+            incoming().dailyWithdrawalLimit <= 500000 &&
+            incoming().totalWithdrawn == 0 &&
+            incoming().pendingWithdrawals == 0 &&
+            incoming().withdrawnToday == 0
+          )
+        );
+
+      allow update: if isVerifiedUser() && isValidId(userId) &&
+        isValidUser(incoming(), userId) &&
+        incoming().id == existing().id &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            isOwner(userId) && (
+              // Action 1: Update personal profile fields only
+              incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'address', 'panNumber', 'avatarUrl', 'updatedAt']) ||
+              // Action 2: Manage linked payout beneficiaries only
+              incoming().diff(existing()).affectedKeys().hasOnly(['bankBeneficiaries', 'upiBeneficiaries', 'updatedAt']) ||
+              // Action 3: Reserve funds during an atomic withdrawal batch
+              (
+                (!('isFrozen' in existing()) || existing().isFrozen == false) &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['availableBalance', 'pendingWithdrawals', 'withdrawnToday', 'updatedAt']) &&
+                incoming().availableBalance < existing().availableBalance &&
+                incoming().availableBalance >= 0 &&
+                (existing().availableBalance - incoming().availableBalance) == (incoming().pendingWithdrawals - existing().pendingWithdrawals) &&
+                (existing().availableBalance - incoming().availableBalance) == (incoming().withdrawnToday - existing().withdrawnToday) &&
+                incoming().withdrawnToday <= existing().dailyWithdrawalLimit
+              )
+            )
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(userId) && existing().role != 'admin';
+    }
+
+    // Withdrawal Requests & Settlement Lifecycle
+    match /withdrawals/{withdrawalId} {
+      allow get: if isVerifiedUser() && isValidId(withdrawalId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isAdmin() || (isVerifiedUser() && resource.data.userId == request.auth.uid);
+
+      allow create: if isVerifiedUser() && isValidId(withdrawalId) &&
+        isValidWithdrawal(incoming(), withdrawalId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            incoming().userId == request.auth.uid &&
+            incoming().status == 'pending' &&
+            !('utrNumber' in incoming()) &&
+            !('rejectionReason' in incoming()) &&
+            !('completedAt' in incoming()) &&
+            exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+            (!('isFrozen' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data) ||
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isFrozen == false) &&
+            getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.availableBalance ==
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.availableBalance - incoming().amount &&
+            getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.pendingWithdrawals ==
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.pendingWithdrawals + incoming().amount
+          )
+        );
+
+      allow update: if isVerifiedUser() && isValidId(withdrawalId) &&
+        isValidWithdrawal(incoming(), withdrawalId) &&
+        incoming().id == existing().id &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            existing().userId == request.auth.uid &&
+            existing().status == 'pending' &&
+            incoming().status == 'pending' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['statusTimeline', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(withdrawalId);
+    }
+
+    // Platform Fee & Rail Configuration
+    match /config/{configId} {
+      allow get: if isVerifiedUser() && configId in ['fees', 'system'];
+      allow list: if false;
+      allow create, update: if isAdmin() &&
+        configId in ['fees', 'system'] &&
+        incoming().updatedAt == request.time && (
+          (configId == 'fees' && isValidFeeConfig(incoming())) ||
+          (configId == 'system' && isValidSystemConfig(incoming()))
+        );
+      allow delete: if false;
+    }
+
+    // Balance & Quota Adjustments Ledger
+    match /adjustments/{adjustmentId} {
+      allow get: if isVerifiedUser() && isValidId(adjustmentId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isAdmin() || (isVerifiedUser() && resource.data.userId == request.auth.uid);
+      allow create: if isAdmin() && isValidId(adjustmentId) &&
+        isValidAdjustment(incoming(), adjustmentId) &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(adjustmentId);
+    }
+
+    // Immutable Administrative Audit Logs
+    match /adminLogs/{logId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin() && isValidId(logId) &&
+        isValidAdminLog(incoming(), logId) &&
+        incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // User Notifications
+    match /notifications/{notificationId} {
+      allow get: if isVerifiedUser() && isValidId(notificationId) && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isAdmin() || (isVerifiedUser() && resource.data.userId == request.auth.uid);
+
+      allow create: if isVerifiedUser() && isValidId(notificationId) &&
+        isValidNotification(incoming(), notificationId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            incoming().userId == request.auth.uid &&
+            incoming().read == false
+          )
+        );
+
+      allow update: if isVerifiedUser() && isValidId(notificationId) &&
+        isValidNotification(incoming(), notificationId) &&
+        incoming().id == existing().id &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            existing().userId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['read', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(notificationId) && (existing().userId == request.auth.uid || isAdmin());
+    }
+  }
+}
