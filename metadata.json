@@ -1,0 +1,6 @@
+{
+  "name": "PayFlow - Modern Financial Withdrawal Platform",
+  "description": "Premium fintech money withdrawal platform with real-time payout tracking, transparent fee calculations, instant UPI/Bank transfers, security OTP verification, and comprehensive admin controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
