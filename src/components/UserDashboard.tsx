@@ -17,6 +17,9 @@ import {
   Building2,
   Smartphone,
   Banknote,
+  Percent,
+  RotateCcw,
+  Calculator,
 } from 'lucide-react';
 
 import { WithdrawalModal } from './WithdrawalModal';
@@ -37,7 +40,8 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
   onSelectTransaction,
   onOpenReceipt,
 }) => {
-  const { currentUser, withdrawals, feeConfig } = useFintech();
+  const { currentUser, withdrawals, feeConfig, calculateFee, calculateRefundFee } = useFintech();
+  const [feePreviewAmountStr, setFeePreviewAmountStr] = useState<string>('5000');
 
   // Internal modal states when not provided as props
   const [internalWithdrawOpen, setInternalWithdrawOpen] = useState(false);
@@ -112,6 +116,45 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
     100,
     Math.round((currentUser.withdrawnToday / currentUser.dailyWithdrawalLimit) * 100)
   );
+
+  // Live Withdrawal Fee & Refund Fee calculations (controlled by Admin)
+  const previewAmount = Math.max(0, parseFloat(feePreviewAmountStr) || 0);
+  const withdrawalFeePreview = calculateFee(previewAmount);
+  const refundFeePreview = calculateRefundFee(previewAmount);
+
+  const rejectedTxns = userWithdrawals.filter((tx) => tx.status === 'rejected');
+  const activeOrCompletedTxns = userWithdrawals.filter((tx) => tx.status !== 'rejected');
+  const totalWithdrawalFeesPaid = activeOrCompletedTxns.reduce(
+    (sum, tx) => sum + (tx.feeAmount || 0) + (tx.gstAmount || 0),
+    0
+  );
+  const totalRefundFeesCharged = rejectedTxns.reduce(
+    (sum, tx) => sum + (tx.refundFeeAmount ?? 0),
+    0
+  );
+  const totalRefundedNet = rejectedTxns.reduce(
+    (sum, tx) => sum + (tx.refundedAmount ?? Math.max(0, tx.amount - (tx.refundFeeAmount ?? 0))),
+    0
+  );
+
+  const withdrawalFeeFormulaLabel =
+    feeConfig.feeType === 'flat'
+      ? `Flat ₹${feeConfig.flatFee.toFixed(2)} per payout`
+      : feeConfig.feeType === 'percentage'
+      ? `${feeConfig.percentageFee}% of payout amount`
+      : `₹${feeConfig.flatFee.toFixed(2)} + ${feeConfig.percentageFee}%`;
+
+  const refundFeeEnabled = feeConfig.refundFeeEnabled !== false;
+  const refundFeeType = feeConfig.refundFeeType || 'flat';
+  const refundFlatFee = Number(feeConfig.refundFlatFee ?? 0);
+  const refundPercentageFee = Number(feeConfig.refundPercentageFee ?? 0);
+  const refundFeeFormulaLabel = !refundFeeEnabled
+    ? 'Waived by Admin (₹0.00)'
+    : refundFeeType === 'flat'
+    ? `Flat ₹${refundFlatFee.toFixed(2)} per refund`
+    : refundFeeType === 'percentage'
+    ? `${refundPercentageFee}% of refund amount`
+    : `₹${refundFlatFee.toFixed(2)} + ${refundPercentageFee}%`;
 
   const getStatusBadge = (status: TransactionStatus) => {
     switch (status) {
@@ -354,6 +397,167 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
         </div>
       </div>
 
+      {/* Withdrawal Fee & Refund Fee (Admin-Controlled Live Schedule) */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                Withdrawal Fee &amp; Refund Fee Schedule
+              </h2>
+              <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 border border-blue-200/70 dark:border-blue-800/60">
+                <ShieldCheck className="w-3 h-3" />
+                Admin Controlled · Live
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Real-time gateway withdrawal charges and rejected-payout refund fees configured by Treasury Admin
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-1.5">
+            <Calculator className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+            <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap">
+              Estimate on ₹
+            </span>
+            <input
+              type="number"
+              min="0"
+              value={feePreviewAmountStr}
+              onChange={(e) => setFeePreviewAmountStr(e.target.value)}
+              aria-label="Fee estimator amount in INR"
+              className="w-24 bg-transparent text-xs font-mono font-bold text-slate-900 dark:text-white focus:outline-none text-right"
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Card A: Withdrawal Fee */}
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/30 p-4 space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+                  <Percent className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-xs font-bold uppercase tracking-wide text-slate-800 dark:text-slate-100">
+                    Withdrawal Fee
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+                    {withdrawalFeeFormulaLabel} + {feeConfig.gstRatePercent}% GST
+                  </p>
+                </div>
+              </div>
+              <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800 text-slate-700 dark:text-slate-300 uppercase">
+                {feeConfig.feeType.replace(/_/g, ' ')}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-200/70 dark:border-slate-800 text-xs">
+              <div>
+                <span className="text-[10px] text-slate-500 dark:text-slate-400 block">Processing Fee</span>
+                <span className="font-mono font-bold text-slate-900 dark:text-white">
+                  ₹{withdrawalFeePreview.feeAmount.toFixed(2)}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-500 dark:text-slate-400 block">
+                  GST ({feeConfig.gstRatePercent}%)
+                </span>
+                <span className="font-mono font-bold text-slate-900 dark:text-white">
+                  ₹{withdrawalFeePreview.gstAmount.toFixed(2)}
+                </span>
+              </div>
+              <div className="text-right">
+                <span className="text-[10px] text-slate-500 dark:text-slate-400 block">Net Payout</span>
+                <span className="font-mono font-bold text-blue-600 dark:text-blue-400">
+                  ₹{withdrawalFeePreview.netPayableAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between text-[11px] pt-2 border-t border-slate-200/70 dark:border-slate-800 text-slate-500 dark:text-slate-400">
+              <span>
+                Limits: ₹{feeConfig.minWithdrawalAmount.toLocaleString('en-IN')} – ₹
+                {feeConfig.maxWithdrawalAmountPerTxn.toLocaleString('en-IN')}
+              </span>
+              <span className="font-mono">
+                Paid in ledger:{' '}
+                <strong className="text-slate-800 dark:text-slate-200">
+                  ₹{totalWithdrawalFeesPaid.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                </strong>
+              </span>
+            </div>
+          </div>
+
+          {/* Card B: Refund Fee */}
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/30 p-4 space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-amber-50 dark:bg-amber-950/50 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
+                  <RotateCcw className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-xs font-bold uppercase tracking-wide text-slate-800 dark:text-slate-100">
+                    Refund Fee
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+                    {refundFeeFormulaLabel}
+                  </p>
+                </div>
+              </div>
+              <span
+                className={`text-[10px] font-semibold px-2 py-0.5 rounded uppercase ${
+                  refundFeeEnabled
+                    ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300'
+                    : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                }`}
+              >
+                {refundFeeEnabled ? 'Active Fee' : '0 Fee / Free'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-200/70 dark:border-slate-800 text-xs">
+              <div>
+                <span className="text-[10px] text-slate-500 dark:text-slate-400 block">If Refunded</span>
+                <span className="font-mono font-bold text-slate-900 dark:text-white">
+                  ₹{previewAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-500 dark:text-slate-400 block">Refund Fee</span>
+                <span className="font-mono font-bold text-rose-600 dark:text-rose-400">
+                  -₹{refundFeePreview.refundFeeAmount.toFixed(2)}
+                </span>
+              </div>
+              <div className="text-right">
+                <span className="text-[10px] text-slate-500 dark:text-slate-400 block">Restored to Wallet</span>
+                <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                  ₹{refundFeePreview.netRefundAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between text-[11px] pt-2 border-t border-slate-200/70 dark:border-slate-800 text-slate-500 dark:text-slate-400">
+              <span>
+                {rejectedTxns.length} {rejectedTxns.length === 1 ? 'refund' : 'refunds'} processed
+              </span>
+              <span className="font-mono">
+                Refund fees:{' '}
+                <strong className="text-slate-800 dark:text-slate-200">
+                  ₹{totalRefundFeesCharged.toFixed(2)}
+                </strong>
+                {rejectedTxns.length > 0 && (
+                  <span className="text-emerald-600 dark:text-emerald-400 ml-1.5">
+                    (Net ₹{totalRefundedNet.toLocaleString('en-IN')})
+                  </span>
+                )}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Transaction History Section */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xs overflow-hidden">
         {/* Table Filter & Search Header */}
@@ -489,14 +693,32 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                     ₹{tx.amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                   </td>
 
-                  {/* Fee + GST */}
+                  {/* Fee + GST / Refund Fee */}
                   <td className="py-3.5 px-4 text-right font-mono text-slate-500 dark:text-slate-400 tabular-nums">
-                    -₹{(tx.feeAmount + tx.gstAmount).toFixed(2)}
+                    {tx.status === 'rejected' ? (
+                      <div>
+                        <span className="text-rose-600 dark:text-rose-400">
+                          -₹{(tx.refundFeeAmount ?? 0).toFixed(2)}
+                        </span>
+                        <span className="block text-[10px] text-slate-400">Refund Fee</span>
+                      </div>
+                    ) : (
+                      `-₹${(tx.feeAmount + tx.gstAmount).toFixed(2)}`
+                    )}
                   </td>
 
-                  {/* Net Payable */}
+                  {/* Net Payable / Net Refunded */}
                   <td className="py-3.5 px-4 text-right font-mono font-bold text-slate-900 dark:text-white tabular-nums">
-                    ₹{tx.netPayableAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    {tx.status === 'rejected' ? (
+                      <div>
+                        <span className="text-emerald-600 dark:text-emerald-400">
+                          ₹{(tx.refundedAmount ?? Math.max(0, tx.amount - (tx.refundFeeAmount ?? 0))).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </span>
+                        <span className="block text-[10px] font-normal text-slate-400">Refunded</span>
+                      </div>
+                    ) : (
+                      `₹${tx.netPayableAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+                    )}
                   </td>
 
                   {/* Status Badge */}

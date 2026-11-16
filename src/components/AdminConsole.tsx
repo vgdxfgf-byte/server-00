@@ -26,6 +26,8 @@ import {
   Smartphone,
   Check,
   Trash2,
+  Percent,
+  RotateCcw,
 } from 'lucide-react';
 import { WithdrawalRequest, User, BalanceAdjustment } from '../types';
 
@@ -48,6 +50,8 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
     deletePayoutAccount,
     deleteTransaction,
     deleteUser,
+    calculateFee,
+    calculateRefundFee,
   } = useFintech();
 
   const [currentSection, setCurrentSection] = useState<AdminSection>('overview');
@@ -90,13 +94,19 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
   const [adjReason, setAdjReason] = useState<string>('Compliance Treasury Adjustment');
   const [adjFeedback, setAdjFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  // Fee Config Form State
+  // Fee Config Form State (Withdrawal Fee + Refund Fee)
   const [feeForm, setFeeForm] = useState({
+    feeType: feeConfig.feeType,
     flatFee: feeConfig.flatFee,
     percentageFee: feeConfig.percentageFee,
+    gstRatePercent: feeConfig.gstRatePercent,
     minWithdrawalAmount: feeConfig.minWithdrawalAmount,
     maxWithdrawalAmountPerTxn: feeConfig.maxWithdrawalAmountPerTxn,
     dailyCeilingLimit: feeConfig.dailyCeilingLimit,
+    refundFeeEnabled: feeConfig.refundFeeEnabled !== false,
+    refundFeeType: feeConfig.refundFeeType || 'flat',
+    refundFlatFee: feeConfig.refundFlatFee ?? 15,
+    refundPercentageFee: feeConfig.refundPercentageFee ?? 0,
   });
   const [feeSaveSuccess, setFeeSaveSuccess] = useState(false);
 
@@ -108,11 +118,17 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
 
   React.useEffect(() => {
     setFeeForm({
+      feeType: feeConfig.feeType,
       flatFee: feeConfig.flatFee,
       percentageFee: feeConfig.percentageFee,
+      gstRatePercent: feeConfig.gstRatePercent,
       minWithdrawalAmount: feeConfig.minWithdrawalAmount,
       maxWithdrawalAmountPerTxn: feeConfig.maxWithdrawalAmountPerTxn,
       dailyCeilingLimit: feeConfig.dailyCeilingLimit,
+      refundFeeEnabled: feeConfig.refundFeeEnabled !== false,
+      refundFeeType: feeConfig.refundFeeType || 'flat',
+      refundFlatFee: feeConfig.refundFlatFee ?? 15,
+      refundPercentageFee: feeConfig.refundPercentageFee ?? 0,
     });
   }, [feeConfig]);
 
@@ -1030,80 +1046,290 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
         )}
 
         {/* SECTION 5: SETTINGS */}
-        {currentSection === 'settings' && (
-          <div className="max-w-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-xs space-y-4">
-            <div>
-              <h3 className="font-bold text-slate-900 dark:text-white text-base">Limits & Gateway Fee Configuration</h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400">Configure global platform withdrawal minimums, limits, and transparent fees</p>
+        {currentSection === 'settings' && (() => {
+          const sampleAmt = 5000;
+          const draftWFeeRaw =
+            feeForm.feeType === 'flat'
+              ? feeForm.flatFee
+              : feeForm.feeType === 'percentage'
+              ? (sampleAmt * feeForm.percentageFee) / 100
+              : feeForm.flatFee + (sampleAmt * feeForm.percentageFee) / 100;
+          const draftWFee = Math.round(Math.max(0, draftWFeeRaw) * 100) / 100;
+          const draftWGst = Math.round(((draftWFee * feeForm.gstRatePercent) / 100) * 100) / 100;
+          const draftWNet = Math.max(0, Math.round((sampleAmt - draftWFee - draftWGst) * 100) / 100);
+
+          const draftRFeeRaw = !feeForm.refundFeeEnabled
+            ? 0
+            : feeForm.refundFeeType === 'flat'
+            ? feeForm.refundFlatFee
+            : feeForm.refundFeeType === 'percentage'
+            ? (sampleAmt * feeForm.refundPercentageFee) / 100
+            : feeForm.refundFlatFee + (sampleAmt * feeForm.refundPercentageFee) / 100;
+          const draftRFee = Math.min(sampleAmt, Math.round(Math.max(0, draftRFeeRaw) * 100) / 100);
+          const draftRNet = Math.max(0, Math.round((sampleAmt - draftRFee) * 100) / 100);
+
+          return (
+            <div className="max-w-4xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-xs space-y-6">
+              <div>
+                <h3 className="font-bold text-slate-900 dark:text-white text-base">
+                  Withdrawal Fee, Refund Fee &amp; Limits Configuration
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Changes saved here sync live to every User Dashboard and apply immediately to withdrawals and rejected refunds.
+                </p>
+              </div>
+
+              {feeSaveSuccess && (
+                <div className="p-3 rounded-xl bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 text-xs font-semibold">
+                  Withdrawal fee, refund fee, and transaction limits updated live across all User Dashboards.
+                </div>
+              )}
+
+              <form onSubmit={handleSaveFees} className="space-y-6">
+                {/* Subsection 1: Withdrawal Fee & Limits */}
+                <div className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/30 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Percent className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                      <h4 className="text-sm font-bold text-slate-900 dark:text-white">
+                        Withdrawal Fee &amp; Payout Limits
+                      </h4>
+                    </div>
+                    <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                      ₹5,000 Preview: Fee ₹{draftWFee.toFixed(2)} + GST ₹{draftWGst.toFixed(2)} → Net{' '}
+                      <strong className="text-blue-600 dark:text-blue-400">₹{draftWNet.toLocaleString('en-IN')}</strong>
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Withdrawal Fee Mode
+                      </label>
+                      <select
+                        value={feeForm.feeType}
+                        onChange={(e) =>
+                          setFeeForm({
+                            ...feeForm,
+                            feeType: e.target.value as 'flat' | 'percentage' | 'flat_plus_percent',
+                          })
+                        }
+                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold"
+                      >
+                        <option value="flat">Flat Fee (₹)</option>
+                        <option value="percentage">Percentage (%)</option>
+                        <option value="flat_plus_percent">Flat + Percentage</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Flat Processing Fee (INR ₹)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        value={feeForm.flatFee}
+                        onChange={(e) => setFeeForm({ ...feeForm, flatFee: Math.max(0, parseFloat(e.target.value) || 0) })}
+                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono font-bold"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Percentage Platform Fee (%)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="0.1"
+                        value={feeForm.percentageFee}
+                        onChange={(e) =>
+                          setFeeForm({
+                            ...feeForm,
+                            percentageFee: Math.min(100, Math.max(0, parseFloat(e.target.value) || 0)),
+                          })
+                        }
+                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono font-bold"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        GST on Withdrawal Fee (%)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="0.5"
+                        value={feeForm.gstRatePercent}
+                        onChange={(e) =>
+                          setFeeForm({
+                            ...feeForm,
+                            gstRatePercent: Math.min(100, Math.max(0, parseFloat(e.target.value) || 0)),
+                          })
+                        }
+                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono font-bold"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Minimum Withdrawal (INR ₹)
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={feeForm.minWithdrawalAmount}
+                        onChange={(e) =>
+                          setFeeForm({ ...feeForm, minWithdrawalAmount: Math.max(0, parseFloat(e.target.value) || 0) })
+                        }
+                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono font-bold"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Max Per Transaction Limit (INR ₹)
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={feeForm.maxWithdrawalAmountPerTxn}
+                        onChange={(e) =>
+                          setFeeForm({
+                            ...feeForm,
+                            maxWithdrawalAmountPerTxn: Math.max(0, parseFloat(e.target.value) || 0),
+                          })
+                        }
+                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono font-bold"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Subsection 2: Refund Fee Policy */}
+                <div className="p-4 rounded-2xl border border-amber-200/80 dark:border-amber-800/50 bg-amber-50/40 dark:bg-amber-950/10 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <RotateCcw className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                      <div>
+                        <h4 className="text-sm font-bold text-slate-900 dark:text-white">
+                          Refund Fee Policy (User Dashboard &amp; Rejections)
+                        </h4>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          Control whether a refund processing fee is charged when a withdrawal is rejected &amp; refunded
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setFeeForm({ ...feeForm, refundFeeEnabled: !feeForm.refundFeeEnabled })}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                        feeForm.refundFeeEnabled
+                          ? 'bg-amber-600 text-white hover:bg-amber-500'
+                          : 'bg-emerald-600 text-white hover:bg-emerald-500'
+                      }`}
+                    >
+                      {feeForm.refundFeeEnabled ? 'Refund Fee: ACTIVE' : 'Refund Fee: WAIVED (₹0)'}
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Refund Fee Mode
+                      </label>
+                      <select
+                        disabled={!feeForm.refundFeeEnabled}
+                        value={feeForm.refundFeeType}
+                        onChange={(e) =>
+                          setFeeForm({
+                            ...feeForm,
+                            refundFeeType: e.target.value as 'flat' | 'percentage' | 'flat_plus_percent',
+                          })
+                        }
+                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold disabled:opacity-50"
+                      >
+                        <option value="flat">Flat Refund Fee (₹)</option>
+                        <option value="percentage">Percentage Refund Fee (%)</option>
+                        <option value="flat_plus_percent">Flat + Percentage</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Flat Refund Fee (INR ₹)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.5"
+                        disabled={!feeForm.refundFeeEnabled}
+                        value={feeForm.refundFlatFee}
+                        onChange={(e) =>
+                          setFeeForm({ ...feeForm, refundFlatFee: Math.max(0, parseFloat(e.target.value) || 0) })
+                        }
+                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono font-bold disabled:opacity-50"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Percentage Refund Fee (%)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="0.1"
+                        disabled={!feeForm.refundFeeEnabled}
+                        value={feeForm.refundPercentageFee}
+                        onChange={(e) =>
+                          setFeeForm({
+                            ...feeForm,
+                            refundPercentageFee: Math.min(100, Math.max(0, parseFloat(e.target.value) || 0)),
+                          })
+                        }
+                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono font-bold disabled:opacity-50"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="text-[11px] font-mono text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900/70 border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+                    <span>₹5,000 Rejected Withdrawal Preview:</span>
+                    <span>
+                      Refund Fee:{' '}
+                      <strong className="text-rose-600 dark:text-rose-400">-₹{draftRFee.toFixed(2)}</strong>
+                      {' · '}
+                      Net Restored to User Wallet:{' '}
+                      <strong className="text-emerald-600 dark:text-emerald-400">
+                        ₹{draftRNet.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      </strong>
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Current live config: Withdrawal {feeConfig.feeType} · Refund{' '}
+                    {feeConfig.refundFeeEnabled !== false ? feeConfig.refundFeeType || 'flat' : 'Waived'}
+                  </span>
+                  <button
+                    type="submit"
+                    className="py-2.5 px-6 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-sm transition cursor-pointer"
+                  >
+                    Save Withdrawal &amp; Refund Fees
+                  </button>
+                </div>
+              </form>
             </div>
-
-            {feeSaveSuccess && (
-              <div className="p-3 rounded-xl bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 text-xs font-semibold">
-                Withdrawal parameters and fees updated successfully.
-              </div>
-            )}
-
-            <form onSubmit={handleSaveFees} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                    Flat Processing Fee (INR ₹)
-                  </label>
-                  <input
-                    type="number"
-                    value={feeForm.flatFee}
-                    onChange={(e) => setFeeForm({ ...feeForm, flatFee: parseFloat(e.target.value) || 0 })}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono font-bold"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                    Percentage Platform Fee (%)
-                  </label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={feeForm.percentageFee}
-                    onChange={(e) => setFeeForm({ ...feeForm, percentageFee: parseFloat(e.target.value) || 0 })}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono font-bold"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                    Minimum Withdrawal (INR ₹)
-                  </label>
-                  <input
-                    type="number"
-                    value={feeForm.minWithdrawalAmount}
-                    onChange={(e) => setFeeForm({ ...feeForm, minWithdrawalAmount: parseFloat(e.target.value) || 0 })}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono font-bold"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                    Max Per Transaction Limit (INR ₹)
-                  </label>
-                  <input
-                    type="number"
-                    value={feeForm.maxWithdrawalAmountPerTxn}
-                    onChange={(e) => setFeeForm({ ...feeForm, maxWithdrawalAmountPerTxn: parseFloat(e.target.value) || 0 })}
-                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono font-bold"
-                  />
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                className="py-2.5 px-6 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-sm transition cursor-pointer"
-              >
-                Save Limits & Fees
-              </button>
-            </form>
-          </div>
-        )}
+          );
+        })()}
 
         {/* SECTION 6: COMPLIANCE LOGS */}
         {currentSection === 'logs' && (
@@ -1175,47 +1401,71 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
       )}
 
       {/* Reject Modal */}
-      {rejectingTxn && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-md w-full shadow-2xl">
-            <h3 className="font-bold text-slate-900 dark:text-white text-lg">Reject & Refund Withdrawal</h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              Rejecting will instantly return ₹{rejectingTxn.amount.toLocaleString('en-IN')} back to {rejectingTxn.userName}&apos;s wallet.
-            </p>
+      {rejectingTxn && (() => {
+        const { refundFeeAmount, netRefundAmount } = calculateRefundFee(rejectingTxn.amount);
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-md w-full shadow-2xl">
+              <h3 className="font-bold text-slate-900 dark:text-white text-lg">Reject &amp; Refund Withdrawal</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                Rejecting applies the Admin-configured Refund Fee policy before crediting {rejectingTxn.userName}&apos;s wallet.
+              </p>
 
-            <form onSubmit={handleRejectSubmit} className="mt-4 space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                  Rejection Reason (Audit record)
-                </label>
-                <textarea
-                  rows={3}
-                  value={rejectionReason}
-                  onChange={(e) => setRejectionReason(e.target.value)}
-                  className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs focus:ring-1 focus:ring-rose-500"
-                  required
-                />
+              <div className="mt-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 text-xs space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-slate-500 dark:text-slate-400">Requested Withdrawal:</span>
+                  <span className="font-mono font-semibold text-slate-900 dark:text-white">
+                    ₹{rejectingTxn.amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500 dark:text-slate-400">Admin Refund Fee:</span>
+                  <span className="font-mono font-semibold text-rose-600 dark:text-rose-400">
+                    -₹{refundFeeAmount.toFixed(2)}
+                  </span>
+                </div>
+                <div className="pt-1.5 border-t border-slate-200 dark:border-slate-700 flex justify-between font-bold">
+                  <span className="text-slate-700 dark:text-slate-200">Net Refunded to Wallet:</span>
+                  <span className="font-mono text-emerald-600 dark:text-emerald-400">
+                    ₹{netRefundAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
               </div>
 
-              <div className="flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setRejectingTxn(null)}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white cursor-pointer shadow-sm"
-                >
-                  Confirm Rejection & Refund
-                </button>
-              </div>
-            </form>
+              <form onSubmit={handleRejectSubmit} className="mt-4 space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                    Rejection Reason (Audit record)
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={rejectionReason}
+                    onChange={(e) => setRejectionReason(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs focus:ring-1 focus:ring-rose-500"
+                    required
+                  />
+                </div>
+
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRejectingTxn(null)}
+                    className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white cursor-pointer shadow-sm"
+                  >
+                    Confirm Rejection &amp; Refund
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Super Admin Delete User Payout Account Modal */}
       {deletingPayoutAccount && (

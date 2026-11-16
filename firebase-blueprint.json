@@ -227,6 +227,14 @@
           "description": "Compliance rejection reason.",
           "maxLength": 500
         },
+        "refundFeeAmount": {
+          "type": "number",
+          "description": "Refund processing fee deducted on rejection/refund."
+        },
+        "refundedAmount": {
+          "type": "number",
+          "description": "Net amount refunded to user wallet."
+        },
         "statusTimeline": {
           "type": "array",
           "description": "Bounded list (max 20) of status timeline events."
@@ -273,7 +281,7 @@
     },
     "FeeConfiguration": {
       "title": "FeeConfiguration",
-      "description": "Global platform withdrawal fee and threshold policy stored at config/fees.",
+      "description": "Global platform withdrawal fee, refund fee, and threshold policy stored at config/fees.",
       "type": "object",
       "properties": {
         "feeType": {
@@ -308,6 +316,23 @@
         "freeWithdrawalsPerMonth": {
           "type": "number",
           "description": "Monthly free withdrawal allowance."
+        },
+        "refundFeeEnabled": {
+          "type": "boolean",
+          "description": "Whether admin-controlled refund fee applies on rejected withdrawals."
+        },
+        "refundFeeType": {
+          "type": "string",
+          "enum": ["flat", "percentage", "flat_plus_percent"],
+          "description": "Refund fee calculation mode."
+        },
+        "refundFlatFee": {
+          "type": "number",
+          "description": "Flat refund fee in INR."
+        },
+        "refundPercentageFee": {
+          "type": "number",
+          "description": "Percentage refund fee rate."
         },
         "updatedAt": {
           "type": "string",

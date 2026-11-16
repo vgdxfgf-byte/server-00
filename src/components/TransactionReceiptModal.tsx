@@ -214,24 +214,43 @@ export const TransactionReceiptModal: React.FC<TransactionReceiptModalProps> = (
                   ₹{transaction.amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                 </span>
               </div>
-              <div className="p-3 flex justify-between border-b border-slate-200 dark:border-slate-800">
-                <span className="text-slate-500 dark:text-slate-400">Platform Payout Fee</span>
-                <span className="font-mono tabular-nums text-slate-600 dark:text-slate-400">
-                  - ₹{transaction.feeAmount.toFixed(2)}
-                </span>
-              </div>
-              <div className="p-3 flex justify-between border-b border-slate-200 dark:border-slate-800">
-                <span className="text-slate-500 dark:text-slate-400">Applicable GST on Fee (18%)</span>
-                <span className="font-mono tabular-nums text-slate-600 dark:text-slate-400">
-                  - ₹{transaction.gstAmount.toFixed(2)}
-                </span>
-              </div>
-              <div className="p-3 bg-blue-50/70 dark:bg-blue-950/40 flex justify-between items-center text-sm font-bold">
-                <span className="text-blue-900 dark:text-blue-300">Net Payable Amount</span>
-                <span className="font-mono tabular-nums text-blue-600 dark:text-blue-400 text-base">
-                  ₹{transaction.netPayableAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-                </span>
-              </div>
+              {transaction.status === 'rejected' ? (
+                <>
+                  <div className="p-3 flex justify-between border-b border-slate-200 dark:border-slate-800">
+                    <span className="text-slate-500 dark:text-slate-400">Admin Refund Fee Deducted</span>
+                    <span className="font-mono tabular-nums text-rose-600 dark:text-rose-400">
+                      - ₹{(transaction.refundFeeAmount ?? 0).toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="p-3 bg-emerald-50/70 dark:bg-emerald-950/30 flex justify-between items-center text-sm font-bold">
+                    <span className="text-emerald-900 dark:text-emerald-300">Net Amount Refunded to Wallet</span>
+                    <span className="font-mono tabular-nums text-emerald-600 dark:text-emerald-400 text-base">
+                      ₹{(transaction.refundedAmount ?? Math.max(0, transaction.amount - (transaction.refundFeeAmount ?? 0))).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="p-3 flex justify-between border-b border-slate-200 dark:border-slate-800">
+                    <span className="text-slate-500 dark:text-slate-400">Platform Payout Fee</span>
+                    <span className="font-mono tabular-nums text-slate-600 dark:text-slate-400">
+                      - ₹{transaction.feeAmount.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="p-3 flex justify-between border-b border-slate-200 dark:border-slate-800">
+                    <span className="text-slate-500 dark:text-slate-400">Applicable GST on Fee (18%)</span>
+                    <span className="font-mono tabular-nums text-slate-600 dark:text-slate-400">
+                      - ₹{transaction.gstAmount.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="p-3 bg-blue-50/70 dark:bg-blue-950/40 flex justify-between items-center text-sm font-bold">
+                    <span className="text-blue-900 dark:text-blue-300">Net Payable Amount</span>
+                    <span className="font-mono tabular-nums text-blue-600 dark:text-blue-400 text-base">
+                      ₹{transaction.netPayableAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                </>
+              )}
             </div>
           </div>
 

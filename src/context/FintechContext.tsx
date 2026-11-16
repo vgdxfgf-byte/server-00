@@ -83,6 +83,7 @@ interface FintechContextType {
   switchRole: (role: 'user' | 'admin') => void;
   switchUser: (userId: string) => void;
   calculateFee: (amount: number) => CalculateFeeResult;
+  calculateRefundFee: (amount: number) => { refundFeeAmount: number; netRefundAmount: number };
   requestWithdrawal: (params: {
     amount: number;
     paymentMethod: PaymentMethodType;
@@ -233,6 +234,8 @@ function mapDocToWithdrawal(id: string, data: Record<string, unknown>): Withdraw
     status: (data.status as WithdrawalRequest['status']) || 'pending',
     utrNumber: typeof data.utrNumber === 'string' ? data.utrNumber : undefined,
     rejectionReason: typeof data.rejectionReason === 'string' ? data.rejectionReason : undefined,
+    refundFeeAmount: typeof data.refundFeeAmount === 'number' ? Number(data.refundFeeAmount) : undefined,
+    refundedAmount: typeof data.refundedAmount === 'number' ? Number(data.refundedAmount) : undefined,
     statusTimeline: Array.isArray(data.statusTimeline)
       ? (data.statusTimeline as WithdrawalRequest['statusTimeline'])
       : [],
@@ -485,6 +488,20 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
                   dailyCeilingLimit: Number(data.dailyCeilingLimit ?? INITIAL_FEE_CONFIG.dailyCeilingLimit),
                   freeWithdrawalsPerMonth: Number(
                     data.freeWithdrawalsPerMonth ?? INITIAL_FEE_CONFIG.freeWithdrawalsPerMonth
+                  ),
+                  refundFeeEnabled:
+                    typeof data.refundFeeEnabled === 'boolean'
+                      ? data.refundFeeEnabled
+                      : INITIAL_FEE_CONFIG.refundFeeEnabled,
+                  refundFeeType:
+                    data.refundFeeType === 'flat' ||
+                    data.refundFeeType === 'percentage' ||
+                    data.refundFeeType === 'flat_plus_percent'
+                      ? data.refundFeeType
+                      : INITIAL_FEE_CONFIG.refundFeeType,
+                  refundFlatFee: Number(data.refundFlatFee ?? INITIAL_FEE_CONFIG.refundFlatFee),
+                  refundPercentageFee: Number(
+                    data.refundPercentageFee ?? INITIAL_FEE_CONFIG.refundPercentageFee
                   ),
                 });
               }
@@ -806,6 +823,39 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       gstAmount: gst,
       totalDeductions,
       netPayableAmount: netPayable,
+    };
+  };
+
+  // Refund Fee Calculation Engine (Admin-controlled)
+  const calculateRefundFee = (amount: number): { refundFeeAmount: number; netRefundAmount: number } => {
+    if (!amount || amount <= 0) {
+      return { refundFeeAmount: 0, netRefundAmount: 0 };
+    }
+
+    const enabled = feeConfig.refundFeeEnabled !== false;
+    if (!enabled) {
+      return { refundFeeAmount: 0, netRefundAmount: Math.round(amount * 100) / 100 };
+    }
+
+    const mode = feeConfig.refundFeeType || 'flat';
+    const flat = Math.max(0, Number(feeConfig.refundFlatFee ?? 0));
+    const pct = Math.max(0, Number(feeConfig.refundPercentageFee ?? 0));
+
+    let rawFee = 0;
+    if (mode === 'flat') {
+      rawFee = flat;
+    } else if (mode === 'percentage') {
+      rawFee = (amount * pct) / 100;
+    } else if (mode === 'flat_plus_percent') {
+      rawFee = flat + (amount * pct) / 100;
+    }
+
+    const cappedFee = Math.min(amount, Math.round(rawFee * 100) / 100);
+    const netRefund = Math.max(0, Math.round((amount - cappedFee) * 100) / 100);
+
+    return {
+      refundFeeAmount: cappedFee,
+      netRefundAmount: netRefund,
     };
   };
 
@@ -1188,13 +1238,25 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     );
   };
 
-  // SUPER ADMIN ACTION 4: Reject Request (Reverses funds back to available balance)
+  // SUPER ADMIN ACTION 4: Reject Request (Reverses funds back to available balance minus Admin Refund Fee)
   const adminRejectRequest = (requestId: string, reason: string) => {
     const targetReq = withdrawals.find((r) => r.id === requestId);
     if (!targetReq) return;
     sound.playWarning();
     const nowIso = new Date().toISOString();
     const cleanReason = reason.slice(0, 500);
+    const { refundFeeAmount, netRefundAmount } = calculateRefundFee(targetReq.amount);
+
+    const feeNote =
+      refundFeeAmount > 0
+        ? `Refund fee of ₹${refundFeeAmount.toLocaleString('en-IN', {
+            minimumFractionDigits: 2,
+          })} deducted; ₹${netRefundAmount.toLocaleString('en-IN', {
+            minimumFractionDigits: 2,
+          })} restored to user available balance.`
+        : `Full ₹${netRefundAmount.toLocaleString('en-IN', {
+            minimumFractionDigits: 2,
+          })} restored to user available balance (0 refund fee).`;
 
     const nextTimeline = [
       ...targetReq.statusTimeline,
@@ -1202,9 +1264,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
         status: 'rejected' as const,
         timestamp: nowIso,
         title: 'Withdrawal Rejected & Refunded',
-        description: `Reason: ${cleanReason}. Full ₹${targetReq.amount.toLocaleString(
-          'en-IN'
-        )} restored to user available balance.`,
+        description: `Reason: ${cleanReason}. ${feeNote}`,
         actor: 'Super Admin / Compliance',
       },
     ].slice(0, 20);
@@ -1214,12 +1274,14 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     batch.update(doc(db, 'withdrawals', requestId), {
       status: 'rejected',
       rejectionReason: cleanReason,
+      refundFeeAmount,
+      refundedAmount: netRefundAmount,
       statusTimeline: nextTimeline,
       updatedAt: serverTimestamp(),
     });
     if (targetUser) {
       batch.update(doc(db, 'users', targetUser.id), {
-        availableBalance: Math.round((targetUser.availableBalance + targetReq.amount) * 100) / 100,
+        availableBalance: Math.round((targetUser.availableBalance + netRefundAmount) * 100) / 100,
         pendingWithdrawals: Math.max(
           0,
           Math.round((targetUser.pendingWithdrawals - targetReq.amount) * 100) / 100
@@ -1238,9 +1300,17 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     writeNotificationDoc(
       targetReq.userId,
       'Withdrawal Rejected & Refunded',
-      `Your request ${targetReq.id} for ₹${targetReq.amount.toLocaleString(
-        'en-IN'
-      )} was rejected (${cleanReason}). The full amount has been refunded to your wallet.`,
+      refundFeeAmount > 0
+        ? `Your request ${targetReq.id} for ₹${targetReq.amount.toLocaleString(
+            'en-IN'
+          )} was rejected (${cleanReason}). After a ₹${refundFeeAmount.toLocaleString(
+            'en-IN'
+          )} refund fee, ₹${netRefundAmount.toLocaleString('en-IN')} has been refunded to your wallet.`
+        : `Your request ${targetReq.id} for ₹${targetReq.amount.toLocaleString(
+            'en-IN'
+          )} was rejected (${cleanReason}). The full ₹${netRefundAmount.toLocaleString(
+            'en-IN'
+          )} has been refunded to your wallet.`,
       'withdrawal',
       targetReq.id
     );
@@ -1249,7 +1319,9 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       'REJECT_WITHDRAWAL',
       `Rejected withdrawal of ₹${targetReq.amount.toLocaleString(
         'en-IN'
-      )}. Reason: "${cleanReason}". Full amount refunded to user.`,
+      )}. Reason: "${cleanReason}". Refund fee: ₹${refundFeeAmount.toLocaleString(
+        'en-IN'
+      )}; Net refunded: ₹${netRefundAmount.toLocaleString('en-IN')}.`,
       requestId
     );
   };
@@ -1445,19 +1517,22 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return { success: true, adjustment: adjustmentRecord };
   };
 
-  // Super Admin: Update Fee Configuration
+  // Super Admin: Update Fee Configuration (Withdrawal Fee + Refund Fee)
   const updateFeeConfig = (newConfig: Partial<FeeConfiguration>) => {
     sound.playSuccess();
     const merged: FeeConfiguration = {
       ...feeConfig,
       ...newConfig,
     };
-    setDoc(doc(db, 'config', 'fees'), {
-      ...merged,
-      updatedAt: serverTimestamp(),
-    }).catch((err) => handleFirestoreError(err, OperationType.WRITE, 'config/fees'));
+    setDoc(
+      doc(db, 'config', 'fees'),
+      cleanUndefined({
+        ...merged,
+        updatedAt: serverTimestamp(),
+      })
+    ).catch((err) => handleFirestoreError(err, OperationType.WRITE, 'config/fees'));
 
-    writeAdminLogDoc('FEE_CONFIG_UPDATED', `Updated platform fee policy: ${JSON.stringify(newConfig)}`);
+    writeAdminLogDoc('FEE_CONFIG_UPDATED', `Updated platform withdrawal & refund fee policy: ${JSON.stringify(newConfig)}`);
   };
 
   // Super Admin: Toggle Emergency Killswitch
@@ -1798,6 +1873,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
         switchRole,
         switchUser,
         calculateFee,
+        calculateRefundFee,
         requestWithdrawal,
         verifyOtpAndSubmit,
         depositFunds,

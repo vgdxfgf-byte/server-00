@@ -78,6 +78,8 @@ export interface WithdrawalRequest {
   status: TransactionStatus;
   utrNumber?: string;
   rejectionReason?: string;
+  refundFeeAmount?: number;
+  refundedAmount?: number;
   statusTimeline: StatusTimelineEvent[];
   createdAt: string;
   updatedAt: string;
@@ -104,6 +106,10 @@ export interface FeeConfiguration {
   maxWithdrawalAmountPerTxn: number; // e.g. 100000 INR
   dailyCeilingLimit: number; // e.g. 200000 INR
   freeWithdrawalsPerMonth: number;
+  refundFeeEnabled?: boolean;
+  refundFeeType?: 'flat' | 'percentage' | 'flat_plus_percent';
+  refundFlatFee?: number;
+  refundPercentageFee?: number;
 }
 
 export interface BalanceAdjustment {

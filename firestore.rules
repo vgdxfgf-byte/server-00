@@ -106,8 +106,8 @@ service cloud.firestore {
         data.keys().hasOnly([
           'id', 'userId', 'userName', 'userEmail', 'amount', 'feeAmount',
           'gstAmount', 'netPayableAmount', 'paymentMethod', 'paymentDetails',
-          'status', 'utrNumber', 'rejectionReason', 'statusTimeline',
-          'referenceNumber', 'completedAt', 'createdAt', 'updatedAt'
+          'status', 'utrNumber', 'rejectionReason', 'refundFeeAmount', 'refundedAmount',
+          'statusTimeline', 'referenceNumber', 'completedAt', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.id) &&
         data.id == withdrawalId &&
@@ -124,6 +124,8 @@ service cloud.firestore {
         data.status in ['pending', 'approved', 'processing', 'completed', 'failed', 'rejected'] &&
         (!('utrNumber' in data) || (data.utrNumber is string && data.utrNumber.size() <= 64)) &&
         (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500)) &&
+        (!('refundFeeAmount' in data) || (data.refundFeeAmount is number && data.refundFeeAmount >= 0)) &&
+        (!('refundedAmount' in data) || (data.refundedAmount is number && data.refundedAmount >= 0 && data.refundedAmount <= data.amount)) &&
         data.statusTimeline is list && data.statusTimeline.size() >= 1 && data.statusTimeline.size() <= 20 &&
         data.statusTimeline[0] is map &&
         data.referenceNumber is string && data.referenceNumber.size() >= 1 && data.referenceNumber.size() <= 64 &&
@@ -141,7 +143,9 @@ service cloud.firestore {
         data.keys().hasOnly([
           'feeType', 'flatFee', 'percentageFee', 'gstRatePercent',
           'minWithdrawalAmount', 'maxWithdrawalAmountPerTxn',
-          'dailyCeilingLimit', 'freeWithdrawalsPerMonth', 'updatedAt'
+          'dailyCeilingLimit', 'freeWithdrawalsPerMonth',
+          'refundFeeEnabled', 'refundFeeType', 'refundFlatFee', 'refundPercentageFee',
+          'updatedAt'
         ]) &&
         data.feeType in ['flat', 'percentage', 'flat_plus_percent'] &&
         data.flatFee is number && data.flatFee >= 0 &&
@@ -151,6 +155,10 @@ service cloud.firestore {
         data.maxWithdrawalAmountPerTxn is number && data.maxWithdrawalAmountPerTxn >= data.minWithdrawalAmount &&
         data.dailyCeilingLimit is number && data.dailyCeilingLimit >= data.minWithdrawalAmount &&
         data.freeWithdrawalsPerMonth is number && data.freeWithdrawalsPerMonth >= 0 &&
+        (!('refundFeeEnabled' in data) || data.refundFeeEnabled is bool) &&
+        (!('refundFeeType' in data) || data.refundFeeType in ['flat', 'percentage', 'flat_plus_percent']) &&
+        (!('refundFlatFee' in data) || (data.refundFlatFee is number && data.refundFlatFee >= 0)) &&
+        (!('refundPercentageFee' in data) || (data.refundPercentageFee is number && data.refundPercentageFee >= 0 && data.refundPercentageFee <= 100)) &&
         data.updatedAt is timestamp;
     }
 

@@ -93,9 +93,23 @@ export const TransactionDetailsDrawer: React.FC<TransactionDetailsDrawerProps> =
                 <p className="text-xs text-rose-600 dark:text-rose-300">
                   {transaction.rejectionReason}
                 </p>
-                <p className="text-[11px] text-emerald-600 dark:text-emerald-400 mt-2 font-medium">
-                  ✓ ₹{transaction.amount.toLocaleString('en-IN')} has been safely restored to your available balance.
-                </p>
+                {typeof transaction.refundFeeAmount === 'number' && transaction.refundFeeAmount > 0 ? (
+                  <div className="mt-2 pt-2 border-t border-rose-200/60 dark:border-rose-800/50 space-y-1 text-[11px]">
+                    <div className="flex justify-between text-rose-600 dark:text-rose-300">
+                      <span>Refund Processing Fee:</span>
+                      <span className="font-mono font-semibold">
+                        -₹{transaction.refundFeeAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                    <p className="text-emerald-600 dark:text-emerald-400 font-medium">
+                      ✓ ₹{(transaction.refundedAmount ?? Math.max(0, transaction.amount - transaction.refundFeeAmount)).toLocaleString('en-IN', { minimumFractionDigits: 2 })} net refunded to your available balance.
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-emerald-600 dark:text-emerald-400 mt-2 font-medium">
+                    ✓ ₹{(transaction.refundedAmount ?? transaction.amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })} has been safely restored to your available balance.
+                  </p>
+                )}
               </div>
             )}
           </div>

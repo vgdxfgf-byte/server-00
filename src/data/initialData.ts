@@ -17,6 +17,10 @@ export const INITIAL_FEE_CONFIG: FeeConfiguration = {
   maxWithdrawalAmountPerTxn: 500000, // ₹5,00,000 (5 Lakhs) per transaction limit
   dailyCeilingLimit: 500000, // ₹5,00,000 (5 Lakhs) daily limit
   freeWithdrawalsPerMonth: 2,
+  refundFeeEnabled: true,
+  refundFeeType: 'flat',
+  refundFlatFee: 15, // ₹15 flat refund processing fee when enabled
+  refundPercentageFee: 0,
 };
 
 export const INITIAL_USERS: User[] = [
