@@ -1,7 +1,7 @@
 import React from 'react';
 import { WithdrawalRequest } from '../types';
 import { useFintech } from '../context/FintechContext';
-import { X, CheckCircle2, Clock, AlertCircle, Copy, Check, FileText, Trash2 } from 'lucide-react';
+import { X, CheckCircle2, Clock, AlertCircle, Copy, Check, FileText, Trash2, MessageSquare } from 'lucide-react';
 import { sound } from '../utils/audio';
 
 interface TransactionDetailsDrawerProps {
@@ -110,6 +110,18 @@ export const TransactionDetailsDrawer: React.FC<TransactionDetailsDrawerProps> =
                     ✓ ₹{(transaction.refundedAmount ?? transaction.amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })} has been safely restored to your available balance.
                   </p>
                 )}
+              </div>
+            )}
+
+            {transaction.adminNote && (
+              <div className="mt-4 p-3 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800/60 rounded-xl text-left">
+                <span className="text-xs font-semibold text-blue-700 dark:text-blue-300 flex items-center gap-1.5 mb-1">
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span>Admin Message Note</span>
+                </span>
+                <p className="text-xs text-blue-800 dark:text-blue-200 whitespace-pre-wrap">
+                  {transaction.adminNote}
+                </p>
               </div>
             )}
           </div>

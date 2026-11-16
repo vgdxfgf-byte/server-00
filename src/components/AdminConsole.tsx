@@ -28,8 +28,14 @@ import {
   Trash2,
   Percent,
   RotateCcw,
+  MessageSquare,
+  CalendarClock,
+  Lock,
+  Eye,
+  EyeOff,
+  KeyRound,
 } from 'lucide-react';
-import { WithdrawalRequest, User, BalanceAdjustment } from '../types';
+import { WithdrawalRequest, User, BalanceAdjustment, UpcomingWithdrawal, UpcomingWithdrawalStatus } from '../types';
 
 export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmin }) => {
   const {
@@ -43,14 +49,22 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
     adminMarkProcessing,
     adminMarkCompleted,
     adminRejectRequest,
+    updateWithdrawalAdminNote,
     adjustUserBalance,
+    updatePendingFundNote,
+    upcomingWithdrawals,
+    createUpcomingWithdrawal,
+    updateUpcomingWithdrawal,
+    deleteUpcomingWithdrawal,
+    securityConfig,
+    updateAppSecurityConfig,
+    lockApp,
     updateFeeConfig,
     toggleWithdrawalsEnabled,
     toggleUserFrozenState,
     deletePayoutAccount,
     deleteTransaction,
     deleteUser,
-    calculateFee,
     calculateRefundFee,
   } = useFintech();
 
@@ -61,6 +75,16 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
   // UTR Modal / Prompt State for Mark Completed
   const [completingTxn, setCompletingTxn] = useState<WithdrawalRequest | null>(null);
   const [utrInput, setUtrInput] = useState('');
+  const [completeNoteInput, setCompleteNoteInput] = useState('');
+
+  // Admin Message Note Modal State (Withdrawals & Pending Funds)
+  const [editingWithdrawalNote, setEditingWithdrawalNote] = useState<WithdrawalRequest | null>(null);
+  const [withdrawalNoteText, setWithdrawalNoteText] = useState('');
+  const [notifyWithdrawalNote, setNotifyWithdrawalNote] = useState(true);
+  const [editingPendingNoteUser, setEditingPendingNoteUser] = useState<User | null>(null);
+  const [pendingNoteText, setPendingNoteText] = useState('');
+  const [notifyPendingNote, setNotifyPendingNote] = useState(true);
+  const [noteSaveFeedback, setNoteSaveFeedback] = useState<string | null>(null);
 
   // Rejection Modal State
   const [rejectingTxn, setRejectingTxn] = useState<WithdrawalRequest | null>(null);
@@ -92,6 +116,7 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
   const [adjTarget, setAdjTarget] = useState<'availableBalance' | 'dailyWithdrawalLimit' | 'withdrawnToday' | 'pendingWithdrawals' | 'totalWithdrawn'>('availableBalance');
   const [adjAmountStr, setAdjAmountStr] = useState<string>('5000');
   const [adjReason, setAdjReason] = useState<string>('Compliance Treasury Adjustment');
+  const [adjPendingNote, setAdjPendingNote] = useState<string>('');
   const [adjFeedback, setAdjFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Fee Config Form State (Withdrawal Fee + Refund Fee)
@@ -109,6 +134,35 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
     refundPercentageFee: feeConfig.refundPercentageFee ?? 0,
   });
   const [feeSaveSuccess, setFeeSaveSuccess] = useState(false);
+
+  // Upcoming Withdraw List Form State
+  const defaultUpcomingDate = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  const [editingUpcomingId, setEditingUpcomingId] = useState<string | null>(null);
+  const [upcomingTargetUserId, setUpcomingTargetUserId] = useState<string>('ALL');
+  const [upcomingTitle, setUpcomingTitle] = useState<string>('');
+  const [upcomingAmountStr, setUpcomingAmountStr] = useState<string>('5000');
+  const [upcomingChargeStr, setUpcomingChargeStr] = useState<string>('25');
+  const [upcomingDate, setUpcomingDate] = useState<string>(defaultUpcomingDate);
+  const [upcomingMethod, setUpcomingMethod] = useState<'bank_transfer' | 'upi' | 'any'>('bank_transfer');
+  const [upcomingStatus, setUpcomingStatus] = useState<UpcomingWithdrawalStatus>('upcoming');
+  const [upcomingNote, setUpcomingNote] = useState<string>('');
+  const [upcomingNotifyUser, setUpcomingNotifyUser] = useState<boolean>(true);
+  const [upcomingFeedback, setUpcomingFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [confirmDeleteUpcomingId, setConfirmDeleteUpcomingId] = useState<string | null>(null);
+
+  // App-Open Security Gate Settings State
+  const [secEnabled, setSecEnabled] = useState<boolean>(securityConfig.enabled);
+  const [secUsername, setSecUsername] = useState<string>(securityConfig.username);
+  const [secNewPassword, setSecNewPassword] = useState<string>('');
+  const [secConfirmPassword, setSecConfirmPassword] = useState<string>('');
+  const [secShowPasswords, setSecShowPasswords] = useState<boolean>(false);
+  const [secSaving, setSecSaving] = useState<boolean>(false);
+  const [secFeedback, setSecFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  React.useEffect(() => {
+    setSecEnabled(securityConfig.enabled);
+    setSecUsername(securityConfig.username);
+  }, [securityConfig.enabled, securityConfig.username]);
 
   React.useEffect(() => {
     if (users.length > 0 && (!selectedUserId || !users.some((u) => u.id === selectedUserId))) {
@@ -155,9 +209,68 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
     e.preventDefault();
     if (!completingTxn) return;
     const utr = utrInput.trim() || `UTR${Date.now().toString().slice(-10)}`;
-    adminMarkCompleted(completingTxn.id, utr);
+    adminMarkCompleted(completingTxn.id, utr, completeNoteInput);
     setCompletingTxn(null);
     setUtrInput('');
+    setCompleteNoteInput('');
+  };
+
+  const handleSaveWithdrawalNote = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingWithdrawalNote) return;
+    const res = updateWithdrawalAdminNote(
+      editingWithdrawalNote.id,
+      withdrawalNoteText,
+      notifyWithdrawalNote
+    );
+    if (res.success) {
+      setNoteSaveFeedback(
+        withdrawalNoteText.trim()
+          ? `Saved admin message note on withdrawal ${editingWithdrawalNote.id}.`
+          : `Cleared admin message note on withdrawal ${editingWithdrawalNote.id}.`
+      );
+      setEditingWithdrawalNote(null);
+      setTimeout(() => setNoteSaveFeedback(null), 4000);
+    }
+  };
+
+  const handleClearWithdrawalNote = () => {
+    if (!editingWithdrawalNote) return;
+    const res = updateWithdrawalAdminNote(editingWithdrawalNote.id, '', false);
+    if (res.success) {
+      setNoteSaveFeedback(`Cleared admin message note on withdrawal ${editingWithdrawalNote.id}.`);
+      setEditingWithdrawalNote(null);
+      setTimeout(() => setNoteSaveFeedback(null), 4000);
+    }
+  };
+
+  const handleSavePendingNote = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingPendingNoteUser) return;
+    const res = updatePendingFundNote(
+      editingPendingNoteUser.id,
+      pendingNoteText,
+      notifyPendingNote
+    );
+    if (res.success) {
+      setNoteSaveFeedback(
+        pendingNoteText.trim()
+          ? `Saved Pending Fund note for ${editingPendingNoteUser.name}.`
+          : `Cleared Pending Fund note for ${editingPendingNoteUser.name}.`
+      );
+      setEditingPendingNoteUser(null);
+      setTimeout(() => setNoteSaveFeedback(null), 4000);
+    }
+  };
+
+  const handleClearPendingNote = () => {
+    if (!editingPendingNoteUser) return;
+    const res = updatePendingFundNote(editingPendingNoteUser.id, '', false);
+    if (res.success) {
+      setNoteSaveFeedback(`Cleared Pending Fund note for ${editingPendingNoteUser.name}.`);
+      setEditingPendingNoteUser(null);
+      setTimeout(() => setNoteSaveFeedback(null), 4000);
+    }
   };
 
   const handleRejectSubmit = (e: React.FormEvent) => {
@@ -240,10 +353,14 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
       targetFund: adjTarget,
       amount,
       reason: adjReason,
+      pendingNote: adjTarget === 'pendingWithdrawals' && adjPendingNote.trim() ? adjPendingNote : undefined,
     });
 
     if (res.success) {
       setAdjFeedback({ type: 'success', message: 'Fund ledger updated and audited successfully.' });
+      if (adjTarget === 'pendingWithdrawals') {
+        setAdjPendingNote('');
+      }
       setTimeout(() => setAdjFeedback(null), 3500);
     } else {
       setAdjFeedback({ type: 'error', message: res.error || 'Failed to adjust balance.' });
@@ -256,6 +373,139 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
     setFeeSaveSuccess(true);
     sound.playSuccess();
     setTimeout(() => setFeeSaveSuccess(false), 2500);
+  };
+
+  const resetUpcomingForm = () => {
+    setEditingUpcomingId(null);
+    setUpcomingTargetUserId('ALL');
+    setUpcomingTitle('');
+    setUpcomingAmountStr('5000');
+    setUpcomingChargeStr('25');
+    setUpcomingDate(new Date(Date.now() + 86400000).toISOString().slice(0, 10));
+    setUpcomingMethod('bank_transfer');
+    setUpcomingStatus('upcoming');
+    setUpcomingNote('');
+    setUpcomingNotifyUser(true);
+  };
+
+  const handleStartEditUpcoming = (item: UpcomingWithdrawal) => {
+    setEditingUpcomingId(item.id);
+    setUpcomingTargetUserId(item.targetUserId);
+    setUpcomingTitle(item.title);
+    setUpcomingAmountStr(item.withdrawalAmount.toString());
+    setUpcomingChargeStr(item.withdrawalCharge.toString());
+    setUpcomingDate(item.scheduledDate);
+    setUpcomingMethod(item.paymentMethod);
+    setUpcomingStatus(item.status);
+    setUpcomingNote(item.note || '');
+    setUpcomingFeedback(null);
+  };
+
+  const handleSaveUpcoming = (e: React.FormEvent) => {
+    e.preventDefault();
+    setUpcomingFeedback(null);
+    const amount = parseFloat(upcomingAmountStr);
+    const charge = parseFloat(upcomingChargeStr || '0');
+    if (isNaN(amount) || amount <= 0) {
+      setUpcomingFeedback({ type: 'error', message: 'Enter a valid withdrawal amount greater than ₹0.' });
+      return;
+    }
+    if (isNaN(charge) || charge < 0 || charge > amount) {
+      setUpcomingFeedback({ type: 'error', message: 'Withdrawal charge must be between ₹0 and the withdrawal amount.' });
+      return;
+    }
+
+    if (editingUpcomingId) {
+      const res = updateUpcomingWithdrawal(editingUpcomingId, {
+        targetUserId: upcomingTargetUserId,
+        title: upcomingTitle,
+        withdrawalAmount: amount,
+        withdrawalCharge: charge,
+        scheduledDate: upcomingDate,
+        paymentMethod: upcomingMethod,
+        status: upcomingStatus,
+        note: upcomingNote,
+      });
+      if (res.success) {
+        setUpcomingFeedback({ type: 'success', message: `Updated upcoming withdrawal "${upcomingTitle.trim()}".` });
+        resetUpcomingForm();
+        setTimeout(() => setUpcomingFeedback(null), 4000);
+      } else {
+        setUpcomingFeedback({ type: 'error', message: res.error || 'Failed to update upcoming withdrawal.' });
+      }
+    } else {
+      const res = createUpcomingWithdrawal({
+        targetUserId: upcomingTargetUserId,
+        title: upcomingTitle,
+        withdrawalAmount: amount,
+        withdrawalCharge: charge,
+        scheduledDate: upcomingDate,
+        paymentMethod: upcomingMethod,
+        status: upcomingStatus,
+        note: upcomingNote,
+        notifyUser: upcomingNotifyUser,
+      });
+      if (res.success) {
+        setUpcomingFeedback({
+          type: 'success',
+          message: `Published "${upcomingTitle.trim()}" to the live Upcoming Withdraw List.`,
+        });
+        resetUpcomingForm();
+        setTimeout(() => setUpcomingFeedback(null), 4000);
+      } else {
+        setUpcomingFeedback({ type: 'error', message: res.error || 'Failed to create upcoming withdrawal.' });
+      }
+    }
+  };
+
+  const handleQuickStatusUpcoming = (id: string, status: UpcomingWithdrawalStatus) => {
+    const res = updateUpcomingWithdrawal(id, { status });
+    if (res.success) {
+      setUpcomingFeedback({ type: 'success', message: `Updated upcoming item ${id} status to ${status.toUpperCase()}.` });
+      setTimeout(() => setUpcomingFeedback(null), 3500);
+    }
+  };
+
+  const handleConfirmDeleteUpcoming = (id: string) => {
+    const res = deleteUpcomingWithdrawal(id);
+    setConfirmDeleteUpcomingId(null);
+    if (res.success) {
+      if (editingUpcomingId === id) {
+        resetUpcomingForm();
+      }
+      setUpcomingFeedback({ type: 'success', message: `Removed upcoming withdrawal ${id}.` });
+      setTimeout(() => setUpcomingFeedback(null), 3500);
+    }
+  };
+
+  const handleSaveSecurityGate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSecFeedback(null);
+    if (secNewPassword.trim() && secNewPassword !== secConfirmPassword) {
+      setSecFeedback({ type: 'error', message: 'New password and confirmation password do not match.' });
+      return;
+    }
+    setSecSaving(true);
+    try {
+      const res = await updateAppSecurityConfig({
+        enabled: secEnabled,
+        username: secUsername,
+        newPassword: secNewPassword.trim() || undefined,
+      });
+      if (res.success) {
+        setSecNewPassword('');
+        setSecConfirmPassword('');
+        setSecFeedback({
+          type: 'success',
+          message: 'App-Open Security Username & Password settings saved and synced live.',
+        });
+        setTimeout(() => setSecFeedback(null), 4000);
+      } else {
+        setSecFeedback({ type: 'error', message: res.error || 'Failed to update security settings.' });
+      }
+    } finally {
+      setSecSaving(false);
+    }
   };
 
   const exportCsv = () => {
@@ -307,7 +557,18 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
             </h1>
           </div>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              onClick={() => {
+                sound.playClick();
+                setCurrentSection('security');
+              }}
+              className="px-3.5 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-2 transition cursor-pointer shadow-xs"
+            >
+              <KeyRound className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+              <span>Change Password</span>
+            </button>
+
             <button
               onClick={exportCsv}
               className="px-3.5 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-2 transition cursor-pointer shadow-xs"
@@ -402,7 +663,18 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {pendingQueue.slice(0, 5).map((w) => (
                       <tr key={w.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/40">
-                        <td className="py-3 px-4 font-mono font-semibold text-slate-900 dark:text-white">{w.id}</td>
+                        <td className="py-3 px-4">
+                          <div className="font-mono font-semibold text-slate-900 dark:text-white">{w.id}</div>
+                          {w.adminNote && (
+                            <div
+                              className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 text-[10px] max-w-[180px]"
+                              title={w.adminNote}
+                            >
+                              <MessageSquare className="w-2.5 h-2.5 shrink-0" />
+                              <span className="truncate">{w.adminNote}</span>
+                            </div>
+                          )}
+                        </td>
                         <td className="py-3 px-4">
                           <div className="font-semibold">{w.userName}</div>
                           <div className="text-[10px] text-slate-400">{w.userEmail}</div>
@@ -421,7 +693,7 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                             {w.status}
                           </span>
                         </td>
-                        <td className="py-3 px-4 text-right space-x-1.5">
+                        <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
                           {w.status === 'pending' && (
                             <button
                               onClick={() => adminApproveRequest(w.id)}
@@ -443,12 +715,29 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                               onClick={() => {
                                 setCompletingTxn(w);
                                 setUtrInput('');
+                                setCompleteNoteInput(w.adminNote || '');
                               }}
                               className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition cursor-pointer"
                             >
                               Settle (UTR)
                             </button>
                           )}
+                          <button
+                            onClick={() => {
+                              setEditingWithdrawalNote(w);
+                              setWithdrawalNoteText(w.adminNote || '');
+                              setNotifyWithdrawalNote(true);
+                            }}
+                            className={`px-2 py-1 rounded text-xs font-semibold transition cursor-pointer inline-flex items-center gap-1 ${
+                              w.adminNote
+                                ? 'bg-blue-50 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300 border border-blue-200/70 dark:border-blue-800/60'
+                                : 'bg-slate-100 hover:bg-blue-50 dark:bg-slate-800 dark:hover:bg-blue-950/40 text-slate-600 dark:text-slate-300 hover:text-blue-600'
+                            }`}
+                            title={w.adminNote ? 'Edit withdrawal message note' : 'Add withdrawal message note'}
+                          >
+                            <MessageSquare className="w-3 h-3" />
+                            <span>{w.adminNote ? 'Edit Note' : 'Note'}</span>
+                          </button>
                           <button
                             onClick={() => {
                               setRejectingTxn(w);
@@ -501,6 +790,13 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                 </div>
               )}
 
+              {noteSaveFeedback && (
+                <div className="mb-4 p-3 rounded-xl bg-blue-50 text-blue-800 dark:bg-blue-950/60 dark:text-blue-200 text-xs font-semibold flex items-center justify-between border border-blue-200 dark:border-blue-800/60">
+                  <span>{noteSaveFeedback}</span>
+                  <CheckCircle2 className="w-4 h-4 text-blue-500" />
+                </div>
+              )}
+
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
                 <div className="text-xs text-slate-500">
                   Showing {filteredWithdrawals.length} of {withdrawals.length} transaction entries
@@ -548,7 +844,18 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                     {filteredWithdrawals.map((w) => (
                       <tr key={w.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/40">
-                        <td className="py-3 px-4 font-mono font-semibold">{w.id}</td>
+                        <td className="py-3 px-4">
+                          <div className="font-mono font-semibold">{w.id}</div>
+                          {w.adminNote && (
+                            <div
+                              className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 text-[10px] max-w-[200px]"
+                              title={w.adminNote}
+                            >
+                              <MessageSquare className="w-2.5 h-2.5 shrink-0" />
+                              <span className="truncate">{w.adminNote}</span>
+                            </div>
+                          )}
+                        </td>
                         <td className="py-3 px-4 font-medium">{w.userName}</td>
                         <td className="py-3 px-4 font-mono text-[11px] text-slate-500 dark:text-slate-400">
                           {w.paymentMethod === 'upi' ? w.paymentDetails.upiId : `${w.paymentDetails.bankName} - ${w.paymentDetails.accountNumber}`}
@@ -571,11 +878,11 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                             {w.status}
                           </span>
                         </td>
-                        <td className="py-3 px-4 text-right space-x-1.5">
+                        <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
                           {w.status === 'pending' && (
                             <button
                               onClick={() => adminApproveRequest(w.id)}
-                              className="px-2 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white font-semibold text-[11px]"
+                              className="px-2 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white font-semibold text-[11px] cursor-pointer"
                             >
                               Approve
                             </button>
@@ -585,19 +892,36 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                               onClick={() => {
                                 setCompletingTxn(w);
                                 setUtrInput('');
+                                setCompleteNoteInput(w.adminNote || '');
                               }}
-                              className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-[11px]"
+                              className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-[11px] cursor-pointer"
                             >
                               Complete
                             </button>
                           )}
+                          <button
+                            onClick={() => {
+                              setEditingWithdrawalNote(w);
+                              setWithdrawalNoteText(w.adminNote || '');
+                              setNotifyWithdrawalNote(true);
+                            }}
+                            className={`px-2 py-1 rounded font-semibold text-[11px] transition cursor-pointer inline-flex items-center gap-1 ${
+                              w.adminNote
+                                ? 'bg-blue-50 text-blue-700 dark:bg-blue-950/50 dark:text-blue-300 border border-blue-200/70 dark:border-blue-800/60'
+                                : 'bg-slate-100 hover:bg-blue-50 dark:bg-slate-800 dark:hover:bg-blue-950/40 text-slate-600 dark:text-slate-300 hover:text-blue-600'
+                            }`}
+                            title={w.adminNote ? 'Edit admin message note' : 'Add admin message note'}
+                          >
+                            <MessageSquare className="w-3 h-3" />
+                            <span>{w.adminNote ? 'Edit Note' : 'Note'}</span>
+                          </button>
                           {w.status !== 'completed' && w.status !== 'rejected' && (
                             <button
                               onClick={() => {
                                 setRejectingTxn(w);
                                 setRejectionReason('Compliance failure or regulatory check rejected.');
                               }}
-                              className="px-2 py-1 rounded bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300 font-semibold text-[11px]"
+                              className="px-2 py-1 rounded bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300 font-semibold text-[11px] cursor-pointer"
                             >
                               Reject
                             </button>
@@ -750,6 +1074,22 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                   />
                 </div>
 
+                {adjTarget === 'pendingWithdrawals' && (
+                  <div>
+                    <label className="block text-xs font-semibold text-amber-700 dark:text-amber-300 mb-1">
+                      Pending Fund Message Note (Optional · Visible to User)
+                    </label>
+                    <textarea
+                      rows={2}
+                      maxLength={500}
+                      value={adjPendingNote}
+                      onChange={(e) => setAdjPendingNote(e.target.value)}
+                      placeholder="e.g. Pending bank clearing confirmation — estimated release within 2 hours"
+                      className="w-full p-2.5 rounded-xl border border-amber-200 dark:border-amber-800/60 bg-amber-50/40 dark:bg-amber-950/20 text-xs focus:ring-1 focus:ring-amber-500"
+                    />
+                  </div>
+                )}
+
                 <button
                   type="submit"
                   className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-sm transition cursor-pointer"
@@ -761,8 +1101,19 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
 
             {/* User Ledger Table */}
             <div className="lg:col-span-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-xs">
-              <h3 className="font-bold text-slate-900 dark:text-white text-base mb-1">Active User Balances & Daily Quotas</h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">Live ledger balances across all registered accounts</p>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                <div>
+                  <h3 className="font-bold text-slate-900 dark:text-white text-base">Active User Balances, Pending Funds &amp; Notes</h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">Live ledger balances and Admin Pending Fund message notes across all accounts</p>
+                </div>
+              </div>
+
+              {noteSaveFeedback && (
+                <div className="mb-4 p-3 rounded-xl bg-blue-50 text-blue-800 dark:bg-blue-950/60 dark:text-blue-200 text-xs font-semibold flex items-center justify-between border border-blue-200 dark:border-blue-800/60">
+                  <span>{noteSaveFeedback}</span>
+                  <CheckCircle2 className="w-4 h-4 text-blue-500" />
+                </div>
+              )}
 
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
@@ -770,10 +1121,10 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                     <tr>
                       <th className="py-3 px-4">User</th>
                       <th className="py-3 px-4 text-right">Available Balance</th>
-                      <th className="py-3 px-4 text-right">Daily Limit Quota</th>
-                      <th className="py-3 px-4 text-right">Withdrawn Today</th>
+                      <th className="py-3 px-4 text-right">Pending Fund</th>
+                      <th className="py-3 px-4">Pending Fund Note</th>
                       <th className="py-3 px-4 text-right">Total Settled</th>
-                      <th className="py-3 px-4">Account Status</th>
+                      <th className="py-3 px-4">Status</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -786,11 +1137,35 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                         <td className="py-3 px-4 text-right font-mono font-bold text-emerald-600 dark:text-emerald-400">
                           ₹{u.availableBalance.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                         </td>
-                        <td className="py-3 px-4 text-right font-mono text-slate-600 dark:text-slate-300">
-                          ₹{u.dailyWithdrawalLimit.toLocaleString('en-IN')}
+                        <td className="py-3 px-4 text-right font-mono font-bold text-amber-600 dark:text-amber-400">
+                          ₹{u.pendingWithdrawals.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                         </td>
-                        <td className="py-3 px-4 text-right font-mono text-amber-600 dark:text-amber-400">
-                          ₹{u.withdrawnToday.toLocaleString('en-IN')}
+                        <td className="py-3 px-4">
+                          <div className="flex items-center gap-2">
+                            {u.pendingFundNote ? (
+                              <span
+                                className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 px-2 py-0.5 rounded max-w-[160px] truncate"
+                                title={u.pendingFundNote}
+                              >
+                                {u.pendingFundNote}
+                              </span>
+                            ) : (
+                              <span className="text-[11px] text-slate-400 italic">No note</span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingPendingNoteUser(u);
+                                setPendingNoteText(u.pendingFundNote || '');
+                                setNotifyPendingNote(true);
+                              }}
+                              className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-amber-50 dark:bg-slate-800 dark:hover:bg-amber-950/40 text-slate-600 dark:text-slate-300 hover:text-amber-700 dark:hover:text-amber-300 text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer shrink-0"
+                              title="Add or edit Pending Fund message note"
+                            >
+                              <MessageSquare className="w-3 h-3" />
+                              <span>{u.pendingFundNote ? 'Edit' : 'Add Note'}</span>
+                            </button>
+                          </div>
                         </td>
                         <td className="py-3 px-4 text-right font-mono text-indigo-600 dark:text-indigo-400">
                           ₹{u.totalWithdrawn.toLocaleString('en-IN')}
@@ -814,6 +1189,362 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
             </div>
           </div>
         )}
+
+        {/* SECTION 3B: UPCOMING WITHDRAW LIST */}
+        {currentSection === 'upcoming' && (() => {
+          const parsedAmount = Math.max(0, parseFloat(upcomingAmountStr) || 0);
+          const parsedCharge = Math.max(0, parseFloat(upcomingChargeStr) || 0);
+          const previewNet = Math.max(0, Math.round((parsedAmount - parsedCharge) * 100) / 100);
+
+          return (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Create / Edit Upcoming Withdrawal Form */}
+              <div className="lg:col-span-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-xs">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <h3 className="font-bold text-slate-900 dark:text-white text-base flex items-center gap-2">
+                    <CalendarClock className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                    <span>{editingUpcomingId ? 'Edit Upcoming Withdrawal' : 'Add Upcoming Withdrawal'}</span>
+                  </h3>
+                  {editingUpcomingId && (
+                    <button
+                      type="button"
+                      onClick={resetUpcomingForm}
+                      className="text-[11px] font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-white cursor-pointer"
+                    >
+                      Cancel Edit
+                    </button>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
+                  Publish scheduled withdrawal items with exact withdrawal amount &amp; withdrawal charge directly to users.
+                </p>
+
+                {upcomingFeedback && (
+                  <div
+                    className={`p-3 rounded-xl text-xs font-semibold mb-4 border ${
+                      upcomingFeedback.type === 'success'
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800/60'
+                        : 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/60 dark:text-rose-300 dark:border-rose-800/60'
+                    }`}
+                  >
+                    {upcomingFeedback.message}
+                  </div>
+                )}
+
+                <form onSubmit={handleSaveUpcoming} className="space-y-3.5">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                      Target Audience
+                    </label>
+                    <select
+                      value={upcomingTargetUserId}
+                      onChange={(e) => setUpcomingTargetUserId(e.target.value)}
+                      className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-medium"
+                    >
+                      <option value="ALL">All Users (Broadcast Upcoming List)</option>
+                      {users
+                        .filter((u) => u.role !== 'admin')
+                        .map((u) => (
+                          <option key={u.id} value={u.id}>
+                            {u.name} ({u.email})
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                      Payout Title / Batch Label
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      maxLength={120}
+                      value={upcomingTitle}
+                      onChange={(e) => setUpcomingTitle(e.target.value)}
+                      placeholder="e.g. Weekly Treasury Payout Batch #14"
+                      className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Withdrawal Amount (₹)
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="0.01"
+                        required
+                        value={upcomingAmountStr}
+                        onChange={(e) => setUpcomingAmountStr(e.target.value)}
+                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono font-bold text-xs"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Withdrawal Charge (₹)
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        required
+                        value={upcomingChargeStr}
+                        onChange={(e) => setUpcomingChargeStr(e.target.value)}
+                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono font-bold text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200/70 dark:border-blue-800/50 flex items-center justify-between text-xs">
+                    <span className="text-slate-600 dark:text-slate-300 font-medium">Net Payout to User:</span>
+                    <span className="font-mono font-extrabold text-blue-700 dark:text-blue-300 text-sm">
+                      ₹{previewNet.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Scheduled Date
+                      </label>
+                      <input
+                        type="date"
+                        required
+                        value={upcomingDate}
+                        onChange={(e) => setUpcomingDate(e.target.value)}
+                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono text-xs"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                        Payout Rail
+                      </label>
+                      <select
+                        value={upcomingMethod}
+                        onChange={(e) => setUpcomingMethod(e.target.value as 'bank_transfer' | 'upi' | 'any')}
+                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-medium"
+                      >
+                        <option value="bank_transfer">Bank IMPS / NEFT</option>
+                        <option value="upi">UPI Instant</option>
+                        <option value="any">Bank or UPI (Any)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                      Schedule Status
+                    </label>
+                    <select
+                      value={upcomingStatus}
+                      onChange={(e) => setUpcomingStatus(e.target.value as UpcomingWithdrawalStatus)}
+                      className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-medium"
+                    >
+                      <option value="upcoming">Upcoming (Scheduled)</option>
+                      <option value="ready">Ready for Payout</option>
+                      <option value="completed">Completed</option>
+                      <option value="cancelled">Cancelled</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                      Admin Note (Optional · Visible in User App)
+                    </label>
+                    <textarea
+                      rows={2}
+                      maxLength={500}
+                      value={upcomingNote}
+                      onChange={(e) => setUpcomingNote(e.target.value)}
+                      placeholder="e.g. Keep primary bank account verified before scheduled release."
+                      className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                    />
+                  </div>
+
+                  {!editingUpcomingId && (
+                    <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={upcomingNotifyUser}
+                        onChange={(e) => setUpcomingNotifyUser(e.target.checked)}
+                        className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span>Send in-app notification to target user(s)</span>
+                    </label>
+                  )}
+
+                  <button
+                    type="submit"
+                    className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-sm transition cursor-pointer inline-flex items-center justify-center gap-1.5"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>{editingUpcomingId ? 'Save Upcoming Changes' : 'Publish to Upcoming Withdraw List'}</span>
+                  </button>
+                </form>
+              </div>
+
+              {/* Upcoming Withdraw List Table */}
+              <div className="lg:col-span-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                  <div>
+                    <h3 className="font-bold text-slate-900 dark:text-white text-base">
+                      Live Upcoming Withdraw List ({upcomingWithdrawals.length})
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Visible immediately inside the User App with withdrawal amount, withdrawal charge, and net payout.
+                    </p>
+                  </div>
+                </div>
+
+                {upcomingWithdrawals.length === 0 ? (
+                  <div className="p-10 text-center rounded-2xl border border-dashed border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">
+                    <CalendarClock className="w-8 h-8 mx-auto mb-2 text-slate-400" />
+                    <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                      No upcoming withdrawals scheduled yet
+                    </p>
+                    <p className="text-xs mt-1">
+                      Use the form on the left to add an upcoming withdrawal with amount and charge.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400 font-semibold border-b border-slate-200 dark:border-slate-800">
+                        <tr>
+                          <th className="py-3 px-3">Title &amp; Audience</th>
+                          <th className="py-3 px-3">Date &amp; Rail</th>
+                          <th className="py-3 px-3 text-right">Amount</th>
+                          <th className="py-3 px-3 text-right">Charge</th>
+                          <th className="py-3 px-3 text-right">Net Payout</th>
+                          <th className="py-3 px-3">Status</th>
+                          <th className="py-3 px-3 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {upcomingWithdrawals.map((item) => {
+                          const statusBadge =
+                            item.status === 'ready'
+                              ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                              : item.status === 'completed'
+                              ? 'bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300'
+                              : item.status === 'cancelled'
+                              ? 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300'
+                              : 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300';
+
+                          return (
+                            <tr key={item.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/40 align-top">
+                              <td className="py-3 px-3">
+                                <div className="font-bold text-slate-900 dark:text-white">{item.title}</div>
+                                <div className="flex items-center gap-1.5 mt-1">
+                                  <span
+                                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                                      item.targetUserId === 'ALL'
+                                        ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300'
+                                        : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                                    }`}
+                                  >
+                                    {item.targetUserId === 'ALL' ? 'All Users' : item.targetUserName}
+                                  </span>
+                                  <span className="font-mono text-[10px] text-slate-400">{item.id}</span>
+                                </div>
+                                {item.note && (
+                                  <p className="text-[11px] text-amber-700 dark:text-amber-300 mt-1 max-w-[220px] break-words">
+                                    Note: {item.note}
+                                  </p>
+                                )}
+                              </td>
+                              <td className="py-3 px-3 whitespace-nowrap">
+                                <div className="font-mono font-semibold text-slate-800 dark:text-slate-200">
+                                  {item.scheduledDate}
+                                </div>
+                                <div className="text-[10px] text-slate-500 dark:text-slate-400 uppercase mt-0.5">
+                                  {item.paymentMethod === 'bank_transfer'
+                                    ? 'Bank IMPS/NEFT'
+                                    : item.paymentMethod === 'upi'
+                                    ? 'UPI Instant'
+                                    : 'Bank / UPI'}
+                                </div>
+                              </td>
+                              <td className="py-3 px-3 text-right font-mono font-bold text-slate-900 dark:text-white whitespace-nowrap">
+                                ₹{item.withdrawalAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                              </td>
+                              <td className="py-3 px-3 text-right font-mono font-bold text-rose-600 dark:text-rose-400 whitespace-nowrap">
+                                -₹{item.withdrawalCharge.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                              </td>
+                              <td className="py-3 px-3 text-right font-mono font-bold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+                                ₹{item.netAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                              </td>
+                              <td className="py-3 px-3 whitespace-nowrap">
+                                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${statusBadge}`}>
+                                  {item.status === 'ready' ? 'Ready' : item.status}
+                                </span>
+                              </td>
+                              <td className="py-3 px-3 text-right whitespace-nowrap">
+                                <div className="inline-flex items-center gap-1">
+                                  {item.status === 'upcoming' && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleQuickStatusUpcoming(item.id, 'ready')}
+                                      className="px-2 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 text-[10px] font-bold cursor-pointer"
+                                      title="Mark Ready for Payout"
+                                    >
+                                      Ready
+                                    </button>
+                                  )}
+                                  {(item.status === 'upcoming' || item.status === 'ready') && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleQuickStatusUpcoming(item.id, 'completed')}
+                                      className="px-2 py-1 rounded-lg bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 hover:bg-blue-100 text-[10px] font-bold cursor-pointer"
+                                      title="Mark Completed"
+                                    >
+                                      Done
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleStartEditUpcoming(item)}
+                                    className="p-1.5 rounded-lg text-slate-500 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40 cursor-pointer"
+                                    title="Edit item"
+                                  >
+                                    <Edit3 className="w-3.5 h-3.5" />
+                                  </button>
+                                  {confirmDeleteUpcomingId === item.id ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleConfirmDeleteUpcoming(item.id)}
+                                      className="px-2 py-1 rounded-lg bg-rose-600 text-white text-[10px] font-bold cursor-pointer"
+                                    >
+                                      Confirm
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmDeleteUpcomingId(item.id)}
+                                      className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer"
+                                      title="Delete item"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* SECTION 4: USER DIRECTORY & PAYOUT ACCOUNTS */}
         {currentSection === 'users' && (
@@ -920,6 +1651,33 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                         <span className="font-mono font-bold text-slate-900 dark:text-white">
                           ₹{u.availableBalance.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                         </span>
+                      </div>
+                      <div className="col-span-2 pt-2 border-t border-slate-200/70 dark:border-slate-700/60 flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <span className="text-slate-400 block text-[11px]">
+                            Pending Fund:{' '}
+                            <strong className="font-mono text-amber-600 dark:text-amber-400">
+                              ₹{u.pendingWithdrawals.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                            </strong>
+                          </span>
+                          {u.pendingFundNote && (
+                            <p className="text-[11px] text-amber-700 dark:text-amber-300 mt-0.5 truncate" title={u.pendingFundNote}>
+                              Note: {u.pendingFundNote}
+                            </p>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingPendingNoteUser(u);
+                            setPendingNoteText(u.pendingFundNote || '');
+                            setNotifyPendingNote(true);
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 hover:border-amber-400 text-slate-700 dark:text-slate-200 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer shrink-0"
+                        >
+                          <MessageSquare className="w-3 h-3 text-amber-500" />
+                          <span>{u.pendingFundNote ? 'Edit Pending Note' : 'Pending Note'}</span>
+                        </button>
                       </div>
                     </div>
 
@@ -1069,15 +1827,16 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
           const draftRNet = Math.max(0, Math.round((sampleAmt - draftRFee) * 100) / 100);
 
           return (
-            <div className="max-w-4xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-xs space-y-6">
-              <div>
-                <h3 className="font-bold text-slate-900 dark:text-white text-base">
-                  Withdrawal Fee, Refund Fee &amp; Limits Configuration
-                </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Changes saved here sync live to every User Dashboard and apply immediately to withdrawals and rejected refunds.
-                </p>
-              </div>
+            <div className="max-w-4xl space-y-6">
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-xs space-y-6">
+                <div>
+                  <h3 className="font-bold text-slate-900 dark:text-white text-base">
+                    Withdrawal Fee, Refund Fee &amp; Limits Configuration
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Changes saved here sync live to every User Dashboard and apply immediately to withdrawals and rejected refunds.
+                  </p>
+                </div>
 
               {feeSaveSuccess && (
                 <div className="p-3 rounded-xl bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 text-xs font-semibold">
@@ -1327,9 +2086,155 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                   </button>
                 </div>
               </form>
+
+              <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3">
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                  Want to change your app-open security username or password?
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setCurrentSection('security')}
+                  className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>Open Security &amp; Password</span>
+                </button>
+              </div>
             </div>
+          </div>
           );
         })()}
+
+        {/* SECTION 5B: SECURITY & PASSWORD */}
+        {currentSection === 'security' && (
+          <div className="max-w-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-xs space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+                  <KeyRound className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900 dark:text-white text-base">
+                    Change App-Open Username &amp; Password
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Update the security username and password required whenever someone opens or reloads the app. Saved as a salted SHA-256 hash in Cloud Firestore.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setSecEnabled((prev) => !prev)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                  secEnabled
+                    ? 'bg-emerald-600 text-white hover:bg-emerald-500'
+                    : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300 hover:bg-slate-300'
+                }`}
+              >
+                {secEnabled ? 'Security Gate: ENABLED' : 'Security Gate: DISABLED'}
+              </button>
+            </div>
+
+            {secFeedback && (
+              <div
+                className={`p-3 rounded-xl text-xs font-semibold border ${
+                  secFeedback.type === 'success'
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800/60'
+                    : 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/60 dark:text-rose-300 dark:border-rose-800/60'
+                }`}
+              >
+                {secFeedback.message}
+              </div>
+            )}
+
+            <form onSubmit={handleSaveSecurityGate} className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                    Security Username
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    minLength={3}
+                    maxLength={64}
+                    value={secUsername}
+                    onChange={(e) => setSecUsername(e.target.value)}
+                    placeholder="e.g. server03"
+                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono font-bold"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                    New Security Password
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={secShowPasswords ? 'text' : 'password'}
+                      minLength={6}
+                      maxLength={64}
+                      value={secNewPassword}
+                      onChange={(e) => setSecNewPassword(e.target.value)}
+                      placeholder="Min 6 chars (leave blank to keep)"
+                      className="w-full p-2.5 pr-9 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setSecShowPasswords((prev) => !prev)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                      aria-label={secShowPasswords ? 'Hide password' : 'Show password'}
+                    >
+                      {secShowPasswords ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                    Confirm New Password
+                  </label>
+                  <input
+                    type={secShowPasswords ? 'text' : 'password'}
+                    minLength={6}
+                    maxLength={64}
+                    value={secConfirmPassword}
+                    onChange={(e) => setSecConfirmPassword(e.target.value)}
+                    placeholder="Re-enter new password"
+                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100 dark:border-slate-800">
+                <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Active username: <strong className="font-mono text-slate-700 dark:text-slate-200">{securityConfig.username}</strong>
+                  {' · '}Updated by {securityConfig.updatedBy}
+                </div>
+                <div className="flex items-center gap-2">
+                  {securityConfig.enabled && (
+                    <button
+                      type="button"
+                      onClick={lockApp}
+                      className="py-2 px-4 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer inline-flex items-center gap-1.5"
+                    >
+                      <Lock className="w-3.5 h-3.5" />
+                      <span>Test Lock Now</span>
+                    </button>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={secSaving}
+                    className="py-2.5 px-5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-bold text-xs shadow-sm transition cursor-pointer"
+                  >
+                    {secSaving ? 'Saving...' : 'Save New Password & Settings'}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        )}
 
         {/* SECTION 6: COMPLIANCE LOGS */}
         {currentSection === 'logs' && (
@@ -1377,6 +2282,20 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                   value={utrInput}
                   onChange={(e) => setUtrInput(e.target.value)}
                   className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 font-mono text-xs focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                  Admin Message Note (Optional · Visible to User)
+                </label>
+                <textarea
+                  rows={2}
+                  maxLength={500}
+                  placeholder="e.g. Dispatched via IMPS priority rail. Allow 15 mins to reflect."
+                  value={completeNoteInput}
+                  onChange={(e) => setCompleteNoteInput(e.target.value)}
+                  className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs focus:ring-1 focus:ring-emerald-500"
                 />
               </div>
 
@@ -1694,6 +2613,198 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                   <Trash2 className="w-3.5 h-3.5" />
                   <span>Delete User Permanently</span>
                 </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Withdrawal Message Note Modal */}
+      {editingWithdrawalNote && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-md w-full shadow-2xl">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-9 h-9 rounded-xl bg-blue-100 dark:bg-blue-950/60 flex items-center justify-center">
+                <MessageSquare className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-900 dark:text-white text-base">
+                  Withdrawal Message Note
+                </h3>
+                <p className="text-[11px] font-mono text-slate-400">
+                  {editingWithdrawalNote.id} · {editingWithdrawalNote.userName} · ₹
+                  {editingWithdrawalNote.amount.toLocaleString('en-IN')} ({editingWithdrawalNote.status})
+                </p>
+              </div>
+            </div>
+
+            <form onSubmit={handleSaveWithdrawalNote} className="mt-4 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                  Admin Message Note (Visible on User Dashboard, Audit &amp; Receipt)
+                </label>
+                <textarea
+                  rows={3}
+                  maxLength={500}
+                  value={withdrawalNoteText}
+                  onChange={(e) => setWithdrawalNoteText(e.target.value)}
+                  placeholder="Write a clear message for this withdrawal (e.g. bank verification status, payout schedule, UTR note)..."
+                  className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs focus:ring-1 focus:ring-blue-500"
+                />
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {[
+                    'Under bank verification',
+                    'Approved & queued for next IMPS batch',
+                    'Settled successfully via priority rail',
+                    'Awaiting additional compliance check',
+                  ].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setWithdrawalNoteText(preset)}
+                      className="text-[10px] px-2 py-1 rounded-lg bg-slate-100 hover:bg-blue-50 dark:bg-slate-800 dark:hover:bg-blue-950/40 text-slate-600 dark:text-slate-300 cursor-pointer"
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={notifyWithdrawalNote}
+                  onChange={(e) => setNotifyWithdrawalNote(e.target.checked)}
+                  className="rounded text-blue-600 focus:ring-blue-500"
+                />
+                <span>Send instant notification alert to {editingWithdrawalNote.userName}</span>
+              </label>
+
+              <div className="flex items-center justify-between gap-2 pt-1">
+                {editingWithdrawalNote.adminNote ? (
+                  <button
+                    type="button"
+                    onClick={handleClearWithdrawalNote}
+                    className="px-3 py-2 rounded-xl text-xs font-semibold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer"
+                  >
+                    Clear Note
+                  </button>
+                ) : (
+                  <span />
+                )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingWithdrawalNote(null)}
+                    className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white cursor-pointer shadow-sm"
+                  >
+                    Save Withdrawal Note
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Pending Fund Message Note Modal */}
+      {editingPendingNoteUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-md w-full shadow-2xl">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-9 h-9 rounded-xl bg-amber-100 dark:bg-amber-950/60 flex items-center justify-center">
+                <MessageSquare className="w-5 h-5 text-amber-600 dark:text-amber-400" />
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-900 dark:text-white text-base">
+                  Pending Fund Message Note
+                </h3>
+                <p className="text-[11px] font-mono text-slate-400">
+                  {editingPendingNoteUser.name} · Pending Fund: ₹
+                  {editingPendingNoteUser.pendingWithdrawals.toLocaleString('en-IN', {
+                    minimumFractionDigits: 2,
+                  })}
+                </p>
+              </div>
+            </div>
+
+            <form onSubmit={handleSavePendingNote} className="mt-4 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                  Pending Fund Message Note (Displayed inside User&apos;s Pending Payouts Card)
+                </label>
+                <textarea
+                  rows={3}
+                  maxLength={500}
+                  value={pendingNoteText}
+                  onChange={(e) => setPendingNoteText(e.target.value)}
+                  placeholder="Write a message about this user's pending funds (e.g. settlement timeline, hold reason, bank review)..."
+                  className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs focus:ring-1 focus:ring-amber-500"
+                />
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {[
+                    'In-transit awaiting NPCI / bank settlement confirmation',
+                    'Compliance hold — under routine verification',
+                    'Scheduled for next clearing batch release',
+                    'Pending bank holiday clearance',
+                  ].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setPendingNoteText(preset)}
+                      className="text-[10px] px-2 py-1 rounded-lg bg-slate-100 hover:bg-amber-50 dark:bg-slate-800 dark:hover:bg-amber-950/40 text-slate-600 dark:text-slate-300 cursor-pointer"
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={notifyPendingNote}
+                  onChange={(e) => setNotifyPendingNote(e.target.checked)}
+                  className="rounded text-amber-600 focus:ring-amber-500"
+                />
+                <span>Send instant notification alert to {editingPendingNoteUser.name}</span>
+              </label>
+
+              <div className="flex items-center justify-between gap-2 pt-1">
+                {editingPendingNoteUser.pendingFundNote ? (
+                  <button
+                    type="button"
+                    onClick={handleClearPendingNote}
+                    className="px-3 py-2 rounded-xl text-xs font-semibold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer"
+                  >
+                    Clear Note
+                  </button>
+                ) : (
+                  <span />
+                )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingPendingNoteUser(null)}
+                    className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white cursor-pointer shadow-sm"
+                  >
+                    Save Pending Fund Note
+                  </button>
+                </div>
               </div>
             </form>
           </div>

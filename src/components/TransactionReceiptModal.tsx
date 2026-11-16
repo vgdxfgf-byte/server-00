@@ -150,6 +150,15 @@ export const TransactionReceiptModal: React.FC<TransactionReceiptModalProps> = (
                 {transaction.referenceNumber}
               </span>
             </div>
+
+            {transaction.adminNote && (
+              <div className="pt-2 border-t border-slate-200 dark:border-slate-700/60 text-xs">
+                <span className="text-blue-700 dark:text-blue-300 font-semibold block mb-0.5">
+                  Admin Message Note
+                </span>
+                <p className="text-slate-700 dark:text-slate-300">{transaction.adminNote}</p>
+              </div>
+            )}
           </div>
 
           {/* Beneficiary Details */}

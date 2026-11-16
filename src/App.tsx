@@ -10,7 +10,7 @@ import { ApkGuideModal } from './components/ApkGuideModal';
 import { TransactionReceiptModal } from './components/TransactionReceiptModal';
 import { TransactionDetailsDrawer } from './components/TransactionDetailsDrawer';
 import { WithdrawalRequest } from './types';
-import { ShieldCheck, ArrowRight, RotateCw, AlertTriangle } from 'lucide-react';
+import { ShieldCheck, ArrowRight, RotateCw, AlertTriangle, Lock, User as UserIcon, Eye, EyeOff } from 'lucide-react';
 
 class AppErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -47,6 +47,165 @@ class AppErrorBoundary extends React.Component<
     }
     return this.props.children;
   }
+}
+
+function AppSecurityGate() {
+  const { unlockAppWithCredentials } = useFintech();
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [failedAttempts, setFailedAttempts] = useState(0);
+  const [cooldownUntil, setCooldownUntil] = useState<number>(0);
+  const [secondsLeft, setSecondsLeft] = useState<number>(0);
+
+  React.useEffect(() => {
+    if (!cooldownUntil || cooldownUntil <= Date.now()) {
+      setSecondsLeft(0);
+      return;
+    }
+    const updateTimer = () => {
+      const remaining = Math.max(0, Math.ceil((cooldownUntil - Date.now()) / 1000));
+      setSecondsLeft(remaining);
+    };
+    updateTimer();
+    const timer = setInterval(updateTimer, 500);
+    return () => clearInterval(timer);
+  }, [cooldownUntil]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (cooldownUntil > Date.now()) return;
+    setErrorMsg(null);
+    setSubmitting(true);
+    try {
+      const res = await unlockAppWithCredentials(username, password);
+      if (!res.success) {
+        const nextFails = failedAttempts + 1;
+        setFailedAttempts(nextFails);
+        if (nextFails >= 5) {
+          const until = Date.now() + 30000;
+          setCooldownUntil(until);
+          setFailedAttempts(0);
+          setErrorMsg('Too many failed attempts. Please wait 30 seconds before trying again.');
+        } else {
+          setErrorMsg(res.error || 'Invalid security username or password.');
+        }
+      } else {
+        setFailedAttempts(0);
+        setPassword('');
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4">
+      <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl space-y-6">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <span className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center font-extrabold text-base shadow-sm">
+              S3
+            </span>
+            <div>
+              <h1 className="text-xl font-bold tracking-tight text-white">Server 03 · PayFlow</h1>
+              <p className="text-xs text-slate-400">Security Access Gate</p>
+            </div>
+          </div>
+          <div className="w-9 h-9 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400 flex items-center justify-center">
+            <Lock className="w-4 h-4" />
+          </div>
+        </div>
+
+        <div className="space-y-1.5">
+          <h2 className="text-base font-semibold text-white">Enter Security Credentials</h2>
+          <p className="text-xs text-slate-400 leading-relaxed">
+            This application is protected. Enter your authorized security username and password to open Server 03 · PayFlow.
+          </p>
+        </div>
+
+        {errorMsg && (
+          <div className="p-3 rounded-xl bg-rose-950/50 border border-rose-800/60 text-xs text-rose-300 font-medium">
+            {errorMsg}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+              Security Username
+            </label>
+            <div className="relative">
+              <UserIcon className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                autoComplete="username"
+                autoFocus
+                required
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="Enter security username"
+                className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-slate-950/80 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+              Security Password
+            </label>
+            <div className="relative">
+              <Lock className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type={showPassword ? 'text' : 'password'}
+                autoComplete="current-password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter security password"
+                className="w-full pl-10 pr-10 py-2.5 rounded-xl bg-slate-950/80 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((prev) => !prev)}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+              >
+                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+
+          <button
+            type="submit"
+            disabled={submitting || secondsLeft > 0}
+            className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-semibold text-sm rounded-xl shadow-md transition-colors cursor-pointer flex items-center justify-center gap-2"
+          >
+            {submitting ? (
+              <>
+                <RotateCw className="w-4 h-4 animate-spin" />
+                <span>Verifying...</span>
+              </>
+            ) : secondsLeft > 0 ? (
+              <span>Locked for {secondsLeft}s</span>
+            ) : (
+              <>
+                <ShieldCheck className="w-4 h-4" />
+                <span>Unlock Application</span>
+                <ArrowRight className="w-4 h-4" />
+              </>
+            )}
+          </button>
+        </form>
+
+        <p className="text-[11px] text-slate-500 text-center">
+          Credentials can be updated anytime in Super Admin → Limits, Fees &amp; Security
+        </p>
+      </div>
+    </div>
+  );
 }
 
 function SignInGate() {
@@ -124,6 +283,8 @@ function FintechAppCore() {
     currentRole,
     switchRole,
     withdrawals,
+    securityConfig,
+    appSecurityUnlocked,
   } = useFintech();
 
   // Navigation tab
@@ -146,6 +307,10 @@ function FintechAppCore() {
         </div>
       </div>
     );
+  }
+
+  if (securityConfig.enabled && !appSecurityUnlocked) {
+    return <AppSecurityGate />;
   }
 
   if (!firebaseUser) {

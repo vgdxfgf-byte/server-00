@@ -17,6 +17,7 @@ import {
   deleteDoc,
   writeBatch,
   serverTimestamp,
+  deleteField,
 } from 'firebase/firestore';
 import {
   auth,
@@ -39,6 +40,9 @@ import {
   BalanceAdjustment,
   NotificationItem,
   SystemConfig,
+  UpcomingWithdrawal,
+  UpcomingWithdrawalStatus,
+  AppSecurityConfig,
 } from '../types';
 import {
   INITIAL_USERS,
@@ -50,6 +54,12 @@ import {
   INITIAL_SYSTEM_CONFIG,
 } from '../data/initialData';
 import { sound } from '../utils/audio';
+import {
+  DEFAULT_SECURITY_CONFIG,
+  generateSalt,
+  hashSecurityPassword,
+  verifySecurityCredentials,
+} from '../utils/security';
 
 interface CalculateFeeResult {
   feeAmount: number;
@@ -75,6 +85,7 @@ interface FintechContextType {
   adjustments: BalanceAdjustment[];
   notifications: NotificationItem[];
   systemConfig: SystemConfig;
+  upcomingWithdrawals: UpcomingWithdrawal[];
   currentRole: 'user' | 'admin';
   theme: 'dark' | 'light';
   adminAuthenticated: boolean;
@@ -104,8 +115,13 @@ interface FintechContextType {
   // Super Admin Withdrawal Actions
   adminApproveRequest: (requestId: string) => void;
   adminMarkProcessing: (requestId: string, utrNumber?: string) => void;
-  adminMarkCompleted: (requestId: string, utrNumber: string) => void;
+  adminMarkCompleted: (requestId: string, utrNumber: string, adminNote?: string) => void;
   adminRejectRequest: (requestId: string, reason: string) => void;
+  updateWithdrawalAdminNote: (
+    requestId: string,
+    note: string,
+    notifyUser?: boolean
+  ) => { success: boolean; error?: string };
   deleteTransaction: (requestId: string, refundIfPending?: boolean) => { success: boolean; error?: string };
 
   // Dedicated Balance Management
@@ -115,7 +131,40 @@ interface FintechContextType {
     targetFund?: 'availableBalance' | 'dailyWithdrawalLimit' | 'withdrawnToday' | 'pendingWithdrawals' | 'totalWithdrawn';
     amount: number;
     reason: string;
+    pendingNote?: string;
   }) => { success: boolean; error?: string; adjustment?: BalanceAdjustment };
+  updatePendingFundNote: (
+    userId: string,
+    note: string,
+    notifyUser?: boolean
+  ) => { success: boolean; error?: string };
+
+  // Admin-Managed Upcoming Withdraw List
+  createUpcomingWithdrawal: (params: {
+    targetUserId: string;
+    title: string;
+    withdrawalAmount: number;
+    withdrawalCharge: number;
+    scheduledDate: string;
+    paymentMethod: 'upi' | 'bank_transfer' | 'any';
+    status?: UpcomingWithdrawalStatus;
+    note?: string;
+    notifyUser?: boolean;
+  }) => { success: boolean; error?: string; item?: UpcomingWithdrawal };
+  updateUpcomingWithdrawal: (
+    id: string,
+    updates: Partial<{
+      targetUserId: string;
+      title: string;
+      withdrawalAmount: number;
+      withdrawalCharge: number;
+      scheduledDate: string;
+      paymentMethod: 'upi' | 'bank_transfer' | 'any';
+      status: UpcomingWithdrawalStatus;
+      note: string;
+    }>
+  ) => { success: boolean; error?: string };
+  deleteUpcomingWithdrawal: (id: string) => { success: boolean; error?: string };
 
   // Configuration & Security
   updateFeeConfig: (newConfig: Partial<FeeConfiguration>) => void;
@@ -140,6 +189,20 @@ interface FintechContextType {
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: (userId: string) => void;
   clearAllNotifications: (userId: string) => void;
+
+  // App-Open Security Gate (Username & Password)
+  securityConfig: AppSecurityConfig;
+  appSecurityUnlocked: boolean;
+  unlockAppWithCredentials: (
+    username: string,
+    password: string
+  ) => Promise<{ success: boolean; error?: string }>;
+  lockApp: () => void;
+  updateAppSecurityConfig: (params: {
+    enabled: boolean;
+    username: string;
+    newPassword?: string;
+  }) => Promise<{ success: boolean; error?: string }>;
 
   // Utilities
   resetToDefault: () => void;
@@ -189,6 +252,7 @@ function sanitizeUserForWrite(u: User) {
     isFrozen: Boolean(u.isFrozen),
     address: u.address ? u.address.slice(0, 300) : undefined,
     panNumber: u.panNumber ? u.panNumber.slice(0, 20) : undefined,
+    pendingFundNote: u.pendingFundNote ? u.pendingFundNote.slice(0, 500) : undefined,
   });
 }
 
@@ -216,6 +280,7 @@ function mapDocToUser(id: string, data: Record<string, unknown>): User {
     isFrozen: Boolean(data.isFrozen),
     address: typeof data.address === 'string' ? data.address : undefined,
     panNumber: typeof data.panNumber === 'string' ? data.panNumber : undefined,
+    pendingFundNote: typeof data.pendingFundNote === 'string' ? data.pendingFundNote : undefined,
   };
 }
 
@@ -234,6 +299,7 @@ function mapDocToWithdrawal(id: string, data: Record<string, unknown>): Withdraw
     status: (data.status as WithdrawalRequest['status']) || 'pending',
     utrNumber: typeof data.utrNumber === 'string' ? data.utrNumber : undefined,
     rejectionReason: typeof data.rejectionReason === 'string' ? data.rejectionReason : undefined,
+    adminNote: typeof data.adminNote === 'string' ? data.adminNote : undefined,
     refundFeeAmount: typeof data.refundFeeAmount === 'number' ? Number(data.refundFeeAmount) : undefined,
     refundedAmount: typeof data.refundedAmount === 'number' ? Number(data.refundedAmount) : undefined,
     statusTimeline: Array.isArray(data.statusTimeline)
@@ -243,6 +309,39 @@ function mapDocToWithdrawal(id: string, data: Record<string, unknown>): Withdraw
     updatedAt: toIsoString(data.updatedAt),
     completedAt: data.completedAt ? toIsoString(data.completedAt) : undefined,
     referenceNumber: String(data.referenceNumber || id),
+  };
+}
+
+function mapDocToUpcomingWithdrawal(id: string, data: Record<string, unknown>): UpcomingWithdrawal {
+  const withdrawalAmount = Math.max(0, Number(data.withdrawalAmount ?? 0));
+  const withdrawalCharge = Math.min(withdrawalAmount, Math.max(0, Number(data.withdrawalCharge ?? 0)));
+  const netAmount =
+    typeof data.netAmount === 'number'
+      ? Math.max(0, Number(data.netAmount))
+      : Math.max(0, Math.round((withdrawalAmount - withdrawalCharge) * 100) / 100);
+  const statusVal = data.status;
+  const status: UpcomingWithdrawalStatus =
+    statusVal === 'ready' || statusVal === 'completed' || statusVal === 'cancelled'
+      ? statusVal
+      : 'upcoming';
+  const pm = data.paymentMethod;
+  const paymentMethod: UpcomingWithdrawal['paymentMethod'] =
+    pm === 'upi' || pm === 'bank_transfer' ? pm : 'any';
+
+  return {
+    id: String(data.id || id),
+    targetUserId: String(data.targetUserId || 'ALL'),
+    targetUserName: String(data.targetUserName || 'All Users'),
+    title: String(data.title || 'Scheduled Withdrawal'),
+    withdrawalAmount,
+    withdrawalCharge,
+    netAmount,
+    scheduledDate: String(data.scheduledDate || new Date().toISOString().slice(0, 10)),
+    paymentMethod,
+    status,
+    note: typeof data.note === 'string' ? data.note : undefined,
+    createdAt: toIsoString(data.createdAt),
+    updatedAt: toIsoString(data.updatedAt),
   };
 }
 
@@ -277,6 +376,37 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [systemConfig, setSystemConfig] = useState<SystemConfig>(INITIAL_SYSTEM_CONFIG);
   const [adminLogs, setAdminLogs] = useState<AdminLog[]>([]);
+  const [upcomingWithdrawals, setUpcomingWithdrawals] = useState<UpcomingWithdrawal[]>([]);
+  const [securityConfig, setSecurityConfig] = useState<AppSecurityConfig>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const raw = localStorage.getItem(`${STORAGE_KEY_PREFIX}security_gate`);
+        if (raw) {
+          const parsed = JSON.parse(raw) as Partial<AppSecurityConfig>;
+          if (
+            typeof parsed.username === 'string' &&
+            typeof parsed.passwordSalt === 'string' &&
+            typeof parsed.passwordHash === 'string' &&
+            /^[a-f0-9]{64}$/.test(parsed.passwordHash)
+          ) {
+            return {
+              enabled: parsed.enabled !== false,
+              username: parsed.username,
+              passwordSalt: parsed.passwordSalt,
+              passwordHash: parsed.passwordHash,
+              updatedBy: typeof parsed.updatedBy === 'string' ? parsed.updatedBy : 'Admin',
+              updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : undefined,
+            };
+          }
+        }
+      } catch {
+        // Ignore invalid local cache
+      }
+    }
+    return DEFAULT_SECURITY_CONFIG;
+  });
+  const [appSecurityUnlocked, setAppSecurityUnlocked] = useState<boolean>(false);
+  const unlockedWithHashRef = useRef<string | null>(null);
 
   const seedingRef = useRef<boolean>(false);
 
@@ -461,6 +591,18 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
               await batch.commit();
             }
+
+            const securitySnap = await getDoc(doc(db, 'config', 'security'));
+            if (!securitySnap.exists()) {
+              await setDoc(doc(db, 'config', 'security'), {
+                enabled: DEFAULT_SECURITY_CONFIG.enabled,
+                username: DEFAULT_SECURITY_CONFIG.username,
+                passwordSalt: DEFAULT_SECURITY_CONFIG.passwordSalt,
+                passwordHash: DEFAULT_SECURITY_CONFIG.passwordHash,
+                updatedBy: email || 'Super Admin',
+                updatedAt: serverTimestamp(),
+              });
+            }
           } catch (err) {
             handleFirestoreError(err, OperationType.WRITE, 'seed/initial');
           }
@@ -527,6 +669,40 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
               }
             },
             (err) => handleFirestoreError(err, OperationType.GET, 'config/system')
+          )
+        );
+
+        unsubscribers.push(
+          onSnapshot(
+            doc(db, 'config', 'security'),
+            (snap) => {
+              if (snap.exists()) {
+                const data = snap.data();
+                const nextSec: AppSecurityConfig = {
+                  enabled: data.enabled !== false,
+                  username: String(data.username || DEFAULT_SECURITY_CONFIG.username),
+                  passwordSalt: String(data.passwordSalt || DEFAULT_SECURITY_CONFIG.passwordSalt),
+                  passwordHash: String(data.passwordHash || DEFAULT_SECURITY_CONFIG.passwordHash),
+                  updatedBy: String(data.updatedBy || 'Admin'),
+                  updatedAt: data.updatedAt ? toIsoString(data.updatedAt) : undefined,
+                };
+                setSecurityConfig(nextSec);
+                try {
+                  localStorage.setItem(`${STORAGE_KEY_PREFIX}security_gate`, JSON.stringify(nextSec));
+                } catch {
+                  // Ignore storage quota errors
+                }
+                if (
+                  nextSec.enabled &&
+                  unlockedWithHashRef.current &&
+                  unlockedWithHashRef.current !== nextSec.passwordHash
+                ) {
+                  unlockedWithHashRef.current = null;
+                  setAppSecurityUnlocked(false);
+                }
+              }
+            },
+            (err) => handleFirestoreError(err, OperationType.GET, 'config/security')
           )
         );
 
@@ -634,6 +810,19 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
               (err) => handleFirestoreError(err, OperationType.LIST, 'adminLogs')
             )
           );
+
+          unsubscribers.push(
+            onSnapshot(
+              collection(db, 'upcomingWithdrawals'),
+              (snap) => {
+                const list = snap.docs
+                  .map((d) => mapDocToUpcomingWithdrawal(d.id, d.data()))
+                  .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+                setUpcomingWithdrawals(list);
+              },
+              (err) => handleFirestoreError(err, OperationType.LIST, 'upcomingWithdrawals')
+            )
+          );
         } else {
           // Regular user strictly listens ONLY to their own PII-isolated records
           unsubscribers.push(
@@ -684,6 +873,19 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 setNotifications(list);
               },
               (err) => handleFirestoreError(err, OperationType.LIST, 'notifications')
+            )
+          );
+
+          unsubscribers.push(
+            onSnapshot(
+              query(collection(db, 'upcomingWithdrawals'), where('targetUserId', 'in', [uid, 'ALL'])),
+              (snap) => {
+                const list = snap.docs
+                  .map((d) => mapDocToUpcomingWithdrawal(d.id, d.data()))
+                  .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+                setUpcomingWithdrawals(list);
+              },
+              (err) => handleFirestoreError(err, OperationType.LIST, 'upcomingWithdrawals')
             )
           );
         }
@@ -1172,8 +1374,8 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     );
   };
 
-  // SUPER ADMIN ACTION 3: Mark Completed
-  const adminMarkCompleted = (requestId: string, utrNumber: string) => {
+  // SUPER ADMIN ACTION 3: Mark Completed (With optional Admin Note)
+  const adminMarkCompleted = (requestId: string, utrNumber: string, adminNote?: string) => {
     const targetReq = withdrawals.find((r) => r.id === requestId);
     if (!targetReq) return;
     sound.playSuccess();
@@ -1184,6 +1386,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       targetReq.utrNumber ||
       `UTR${new Date().getFullYear().toString().slice(2)}${Math.floor(1000000000 + Math.random() * 9000000000)}`
     ).slice(0, 64);
+    const cleanNote = adminNote?.trim().slice(0, 500);
 
     const nextTimeline = [
       ...targetReq.statusTimeline,
@@ -1191,20 +1394,26 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
         status: 'completed' as const,
         timestamp: nowIso,
         title: 'Payout Settled & Confirmed',
-        description: `Bank transfer verified and confirmed by Treasury. UTR: ${finalUtr}.`,
+        description: `Bank transfer verified and confirmed by Treasury. UTR: ${finalUtr}.${
+          cleanNote ? ` Admin Note: ${cleanNote}` : ''
+        }`,
         actor: 'Super Admin / Core Settlement Node',
       },
     ].slice(0, 20);
 
     const targetUser = users.find((u) => u.id === targetReq.userId);
     const batch = writeBatch(db);
-    batch.update(doc(db, 'withdrawals', requestId), {
+    const withdrawalUpdates: Record<string, unknown> = {
       status: 'completed',
       utrNumber: finalUtr,
       completedAt: nowIso,
       statusTimeline: nextTimeline,
       updatedAt: serverTimestamp(),
-    });
+    };
+    if (cleanNote) {
+      withdrawalUpdates.adminNote = cleanNote;
+    }
+    batch.update(doc(db, 'withdrawals', requestId), withdrawalUpdates);
     if (targetUser) {
       batch.update(doc(db, 'users', targetUser.id), {
         pendingWithdrawals: Math.max(
@@ -1388,6 +1597,51 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return { success: true };
   };
 
+  // SUPER ADMIN ACTION 4B: Add / Edit / Clear Admin Message Note on ANY Withdrawal
+  const updateWithdrawalAdminNote = (
+    requestId: string,
+    note: string,
+    notifyUser: boolean = true
+  ) => {
+    if (!isAdminAccount) {
+      return { success: false, error: 'Only Super Admin can add or edit withdrawal notes.' };
+    }
+    const targetReq = withdrawals.find((r) => r.id === requestId);
+    if (!targetReq) {
+      return { success: false, error: 'Withdrawal request not found.' };
+    }
+
+    const cleanNote = note.trim().slice(0, 500);
+    sound.playSuccess();
+
+    updateDoc(doc(db, 'withdrawals', requestId), {
+      adminNote: cleanNote ? cleanNote : deleteField(),
+      updatedAt: serverTimestamp(),
+    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `withdrawals/${requestId}`));
+
+    writeAdminLogDoc(
+      'WITHDRAWAL_NOTE_UPDATED',
+      cleanNote
+        ? `Added admin message note on withdrawal ${requestId} (${targetReq.userName}, ₹${targetReq.amount.toLocaleString(
+            'en-IN'
+          )}): "${cleanNote}"`
+        : `Cleared admin message note on withdrawal ${requestId} (${targetReq.userName}).`,
+      requestId
+    );
+
+    if (notifyUser && cleanNote) {
+      writeNotificationDoc(
+        targetReq.userId,
+        `Admin Note on Withdrawal ${targetReq.id}`,
+        cleanNote,
+        'withdrawal',
+        targetReq.id
+      );
+    }
+
+    return { success: true };
+  };
+
   // SUPER ADMIN: Balance Management
   const adjustUserBalance = ({
     userId,
@@ -1395,12 +1649,14 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     targetFund = 'availableBalance',
     amount,
     reason,
+    pendingNote,
   }: {
     userId: string;
     type: 'increase' | 'decrease' | 'set_fixed';
     targetFund?: 'availableBalance' | 'dailyWithdrawalLimit' | 'withdrawnToday' | 'pendingWithdrawals' | 'totalWithdrawn';
     amount: number;
     reason: string;
+    pendingNote?: string;
   }) => {
     if (!reason || reason.trim().length < 5) {
       sound.playWarning();
@@ -1478,6 +1734,10 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     if (targetFund === 'availableBalance' && type === 'increase') {
       userUpdates.totalDeposited = Math.round((targetUser.totalDeposited + amount) * 100) / 100;
     }
+    if (targetFund === 'pendingWithdrawals' && pendingNote !== undefined) {
+      const cleanPendingNote = pendingNote.trim().slice(0, 500);
+      userUpdates.pendingFundNote = cleanPendingNote ? cleanPendingNote : deleteField();
+    }
 
     const batch = writeBatch(db);
     batch.update(doc(db, 'users', userId), userUpdates);
@@ -1515,6 +1775,253 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     );
 
     return { success: true, adjustment: adjustmentRecord };
+  };
+
+  // SUPER ADMIN: Add / Edit / Clear Pending Fund Message Note for any User
+  const updatePendingFundNote = (userId: string, note: string, notifyUser: boolean = true) => {
+    if (!isAdminAccount) {
+      return { success: false, error: 'Only Super Admin can update pending fund notes.' };
+    }
+    const targetUser = users.find((u) => u.id === userId);
+    if (!targetUser) {
+      return { success: false, error: 'User account not found.' };
+    }
+
+    const cleanNote = note.trim().slice(0, 500);
+    sound.playSuccess();
+
+    updateDoc(doc(db, 'users', userId), {
+      pendingFundNote: cleanNote ? cleanNote : deleteField(),
+      updatedAt: serverTimestamp(),
+    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `users/${userId}`));
+
+    writeAdminLogDoc(
+      'PENDING_FUND_NOTE_UPDATED',
+      cleanNote
+        ? `Updated Pending Fund message note for ${targetUser.name} (${userId}, Pending: ₹${targetUser.pendingWithdrawals.toLocaleString(
+            'en-IN'
+          )}): "${cleanNote}"`
+        : `Cleared Pending Fund message note for ${targetUser.name} (${userId}).`,
+      userId
+    );
+
+    if (notifyUser && cleanNote) {
+      writeNotificationDoc(
+        userId,
+        'Admin Note on Pending Funds',
+        cleanNote,
+        'balance'
+      );
+    }
+
+    return { success: true };
+  };
+
+  // SUPER ADMIN: Upcoming Withdraw List CRUD
+  const createUpcomingWithdrawal = ({
+    targetUserId,
+    title,
+    withdrawalAmount,
+    withdrawalCharge,
+    scheduledDate,
+    paymentMethod,
+    status = 'upcoming',
+    note,
+    notifyUser = true,
+  }: {
+    targetUserId: string;
+    title: string;
+    withdrawalAmount: number;
+    withdrawalCharge: number;
+    scheduledDate: string;
+    paymentMethod: 'upi' | 'bank_transfer' | 'any';
+    status?: UpcomingWithdrawalStatus;
+    note?: string;
+    notifyUser?: boolean;
+  }) => {
+    if (!isAdminAccount) {
+      return { success: false, error: 'Only Super Admin can create upcoming withdrawals.' };
+    }
+    const cleanTitle = title.trim().slice(0, 120);
+    if (!cleanTitle) {
+      return { success: false, error: 'Please enter a title or label for this upcoming withdrawal.' };
+    }
+    const amount = Math.round(Number(withdrawalAmount) * 100) / 100;
+    const charge = Math.round(Number(withdrawalCharge) * 100) / 100;
+    if (!amount || amount <= 0) {
+      return { success: false, error: 'Withdrawal amount must be greater than ₹0.' };
+    }
+    if (isNaN(charge) || charge < 0 || charge > amount) {
+      return { success: false, error: 'Withdrawal charge must be between ₹0 and the withdrawal amount.' };
+    }
+
+    const netAmount = Math.max(0, Math.round((amount - charge) * 100) / 100);
+    const resolvedTargetId = targetUserId || 'ALL';
+    const targetUser = resolvedTargetId === 'ALL' ? null : users.find((u) => u.id === resolvedTargetId);
+    const targetUserName = (
+      resolvedTargetId === 'ALL' ? 'All Users' : targetUser?.name || resolvedTargetId
+    ).slice(0, 100);
+    const cleanDate = (scheduledDate.trim() || new Date().toISOString().slice(0, 10)).slice(0, 50);
+    const cleanNote = note?.trim().slice(0, 500) || undefined;
+    const nowIso = new Date().toISOString();
+    const id = `UPW-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`;
+
+    const newItem: UpcomingWithdrawal = {
+      id,
+      targetUserId: resolvedTargetId,
+      targetUserName,
+      title: cleanTitle,
+      withdrawalAmount: amount,
+      withdrawalCharge: charge,
+      netAmount,
+      scheduledDate: cleanDate,
+      paymentMethod,
+      status,
+      note: cleanNote,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    sound.playSuccess();
+
+    setDoc(
+      doc(db, 'upcomingWithdrawals', id),
+      cleanUndefined({
+        ...newItem,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    ).catch((err) => handleFirestoreError(err, OperationType.CREATE, `upcomingWithdrawals/${id}`));
+
+    writeAdminLogDoc(
+      'CREATE_UPCOMING_WITHDRAWAL',
+      `Scheduled upcoming withdrawal "${cleanTitle}" (${id}) for ${targetUserName}: Amount ₹${amount.toLocaleString(
+        'en-IN'
+      )}, Charge ₹${charge.toLocaleString('en-IN')}, Net ₹${netAmount.toLocaleString('en-IN')}, Date ${cleanDate}.`,
+      id
+    );
+
+    if (notifyUser) {
+      const notifMsg = `${cleanTitle}: ₹${amount.toLocaleString(
+        'en-IN'
+      )} (Withdrawal Charge: ₹${charge.toLocaleString('en-IN')} · Net: ₹${netAmount.toLocaleString(
+        'en-IN'
+      )}) scheduled for ${cleanDate}.${cleanNote ? ` Note: ${cleanNote}` : ''}`;
+
+      if (resolvedTargetId === 'ALL') {
+        users.forEach((u) => {
+          writeNotificationDoc(u.id, 'New Upcoming Withdrawal Scheduled', notifMsg, 'withdrawal');
+        });
+      } else {
+        writeNotificationDoc(resolvedTargetId, 'New Upcoming Withdrawal Scheduled', notifMsg, 'withdrawal');
+      }
+    }
+
+    return { success: true, item: newItem };
+  };
+
+  const updateUpcomingWithdrawal = (
+    id: string,
+    updates: Partial<{
+      targetUserId: string;
+      title: string;
+      withdrawalAmount: number;
+      withdrawalCharge: number;
+      scheduledDate: string;
+      paymentMethod: 'upi' | 'bank_transfer' | 'any';
+      status: UpcomingWithdrawalStatus;
+      note: string;
+    }>
+  ) => {
+    if (!isAdminAccount) {
+      return { success: false, error: 'Only Super Admin can update upcoming withdrawals.' };
+    }
+    const existingItem = upcomingWithdrawals.find((item) => item.id === id);
+    if (!existingItem) {
+      return { success: false, error: 'Upcoming withdrawal item not found.' };
+    }
+
+    const nextAmount =
+      updates.withdrawalAmount !== undefined
+        ? Math.round(Number(updates.withdrawalAmount) * 100) / 100
+        : existingItem.withdrawalAmount;
+    const nextCharge =
+      updates.withdrawalCharge !== undefined
+        ? Math.round(Number(updates.withdrawalCharge) * 100) / 100
+        : existingItem.withdrawalCharge;
+
+    if (!nextAmount || nextAmount <= 0) {
+      return { success: false, error: 'Withdrawal amount must be greater than ₹0.' };
+    }
+    if (isNaN(nextCharge) || nextCharge < 0 || nextCharge > nextAmount) {
+      return { success: false, error: 'Withdrawal charge must be between ₹0 and the withdrawal amount.' };
+    }
+
+    const nextNet = Math.max(0, Math.round((nextAmount - nextCharge) * 100) / 100);
+    const nextTargetId = updates.targetUserId ?? existingItem.targetUserId;
+    const targetUser = nextTargetId === 'ALL' ? null : users.find((u) => u.id === nextTargetId);
+    const nextTargetName = (
+      nextTargetId === 'ALL' ? 'All Users' : targetUser?.name || existingItem.targetUserName || nextTargetId
+    ).slice(0, 100);
+    const nextTitle = (updates.title !== undefined ? updates.title.trim() : existingItem.title).slice(0, 120);
+    if (!nextTitle) {
+      return { success: false, error: 'Title cannot be empty.' };
+    }
+
+    const cleanNote =
+      updates.note !== undefined ? updates.note.trim().slice(0, 500) : existingItem.note;
+
+    const payload: Record<string, unknown> = {
+      targetUserId: nextTargetId,
+      targetUserName: nextTargetName,
+      title: nextTitle,
+      withdrawalAmount: nextAmount,
+      withdrawalCharge: nextCharge,
+      netAmount: nextNet,
+      scheduledDate: (updates.scheduledDate ?? existingItem.scheduledDate).slice(0, 50),
+      paymentMethod: updates.paymentMethod ?? existingItem.paymentMethod,
+      status: updates.status ?? existingItem.status,
+      note: cleanNote ? cleanNote : deleteField(),
+      updatedAt: serverTimestamp(),
+    };
+
+    sound.playSuccess();
+    updateDoc(doc(db, 'upcomingWithdrawals', id), payload).catch((err) =>
+      handleFirestoreError(err, OperationType.UPDATE, `upcomingWithdrawals/${id}`)
+    );
+
+    writeAdminLogDoc(
+      'UPDATE_UPCOMING_WITHDRAWAL',
+      `Updated upcoming withdrawal "${nextTitle}" (${id}): Amount ₹${nextAmount.toLocaleString(
+        'en-IN'
+      )}, Charge ₹${nextCharge.toLocaleString('en-IN')}, Status: ${(updates.status ?? existingItem.status).toUpperCase()}.`,
+      id
+    );
+
+    return { success: true };
+  };
+
+  const deleteUpcomingWithdrawal = (id: string) => {
+    if (!isAdminAccount) {
+      return { success: false, error: 'Only Super Admin can delete upcoming withdrawals.' };
+    }
+    const existingItem = upcomingWithdrawals.find((item) => item.id === id);
+    if (!existingItem) {
+      return { success: false, error: 'Upcoming withdrawal item not found.' };
+    }
+
+    sound.playWarning();
+    deleteDoc(doc(db, 'upcomingWithdrawals', id)).catch((err) =>
+      handleFirestoreError(err, OperationType.DELETE, `upcomingWithdrawals/${id}`)
+    );
+
+    writeAdminLogDoc(
+      'DELETE_UPCOMING_WITHDRAWAL',
+      `Deleted upcoming withdrawal "${existingItem.title}" (${id}) for ${existingItem.targetUserName}.`,
+      id
+    );
+
+    return { success: true };
   };
 
   // Super Admin: Update Fee Configuration (Withdrawal Fee + Refund Fee)
@@ -1555,6 +2062,100 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       nextVal ? 'ENABLE_WITHDRAWALS' : 'EMERGENCY_PAUSE_WITHDRAWALS',
       `Platform withdrawal status set to ${nextVal ? 'ENABLED' : 'PAUSED'}. Notice: "${nextNotice || 'None'}".`
     );
+  };
+
+  // App-Open Security Gate Actions
+  const unlockAppWithCredentials = async (username: string, password: string) => {
+    const cleanUser = username.trim();
+    if (!cleanUser || !password) {
+      sound.playWarning();
+      return { success: false, error: 'Please enter both security username and password.' };
+    }
+    const valid = await verifySecurityCredentials(cleanUser, password, securityConfig);
+    if (!valid) {
+      sound.playWarning();
+      return { success: false, error: 'Invalid security username or password.' };
+    }
+    sound.playSuccess();
+    unlockedWithHashRef.current = securityConfig.passwordHash;
+    setAppSecurityUnlocked(true);
+    return { success: true };
+  };
+
+  const lockApp = () => {
+    sound.playClick();
+    unlockedWithHashRef.current = null;
+    setAppSecurityUnlocked(false);
+  };
+
+  const updateAppSecurityConfig = async ({
+    enabled,
+    username,
+    newPassword,
+  }: {
+    enabled: boolean;
+    username: string;
+    newPassword?: string;
+  }) => {
+    if (!isAdminAccount) {
+      return { success: false, error: 'Only Super Admin can update app-open security credentials.' };
+    }
+    const cleanUsername = username.trim().slice(0, 64);
+    if (cleanUsername.length < 3) {
+      return { success: false, error: 'Security username must be at least 3 characters.' };
+    }
+
+    let nextSalt = securityConfig.passwordSalt;
+    let nextHash = securityConfig.passwordHash;
+    const trimmedPassword = newPassword?.trim() || '';
+    if (trimmedPassword.length > 0) {
+      if (trimmedPassword.length < 6) {
+        return { success: false, error: 'New security password must be at least 6 characters.' };
+      }
+      nextSalt = generateSalt();
+      nextHash = await hashSecurityPassword(trimmedPassword, nextSalt);
+    }
+
+    const updatedBy = (firebaseUser?.email || currentUser.name || 'Super Admin').slice(0, 150);
+    const nextLocal: AppSecurityConfig = {
+      enabled,
+      username: cleanUsername,
+      passwordSalt: nextSalt,
+      passwordHash: nextHash,
+      updatedBy,
+      updatedAt: new Date().toISOString(),
+    };
+
+    sound.playSuccess();
+    unlockedWithHashRef.current = nextHash;
+    setSecurityConfig(nextLocal);
+    try {
+      localStorage.setItem(`${STORAGE_KEY_PREFIX}security_gate`, JSON.stringify(nextLocal));
+    } catch {
+      // Ignore storage quota errors
+    }
+
+    try {
+      await setDoc(doc(db, 'config', 'security'), {
+        enabled,
+        username: cleanUsername,
+        passwordSalt: nextSalt,
+        passwordHash: nextHash,
+        updatedBy,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'config/security');
+    }
+
+    writeAdminLogDoc(
+      'UPDATE_APP_SECURITY_GATE',
+      `Updated App-Open Security Gate: status=${enabled ? 'ENABLED' : 'DISABLED'}, username="${cleanUsername}"${
+        trimmedPassword ? ' (password rotated)' : ''
+      }.`
+    );
+
+    return { success: true };
   };
 
   // Super Admin: Toggle Payment Method
@@ -1865,6 +2466,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
         adjustments,
         notifications,
         systemConfig,
+        upcomingWithdrawals,
         currentRole,
         theme,
         adminAuthenticated,
@@ -1881,8 +2483,13 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
         adminMarkProcessing,
         adminMarkCompleted,
         adminRejectRequest,
+        updateWithdrawalAdminNote,
         deleteTransaction,
         adjustUserBalance,
+        updatePendingFundNote,
+        createUpcomingWithdrawal,
+        updateUpcomingWithdrawal,
+        deleteUpcomingWithdrawal,
         updateFeeConfig,
         toggleWithdrawalsEnabled,
         togglePaymentMethod,
@@ -1896,6 +2503,11 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
         markNotificationRead,
         markAllNotificationsRead,
         clearAllNotifications,
+        securityConfig,
+        appSecurityUnlocked,
+        unlockAppWithCredentials,
+        lockApp,
+        updateAppSecurityConfig,
         resetToDefault,
       }}
     >

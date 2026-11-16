@@ -1,6 +1,6 @@
 import React from 'react';
 import { useFintech } from '../context/FintechContext';
-import { Sun, Moon, Shield, ArrowUpRight, User as UserIcon, Smartphone } from 'lucide-react';
+import { Sun, Moon, Shield, ArrowUpRight, Smartphone, Lock } from 'lucide-react';
 import { NotificationsPopover } from './NotificationsPopover';
 import { sound } from '../utils/audio';
 
@@ -21,7 +21,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenApkModal,
   onSelectTxnId,
 }) => {
-  const { currentRole, isAdminAccount, switchRole, theme, toggleTheme, currentUser, withdrawals } = useFintech();
+  const { currentRole, isAdminAccount, switchRole, theme, toggleTheme, currentUser, withdrawals, securityConfig, lockApp } = useFintech();
 
   const pendingCount = withdrawals.filter((w) => w.status === 'pending' || w.status === 'approved').length;
 
@@ -128,6 +128,18 @@ export const Navbar: React.FC<NavbarProps> = ({
           >
             {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           </button>
+
+          {/* Lock App button */}
+          {securityConfig.enabled && (
+            <button
+              onClick={lockApp}
+              aria-label="Lock application"
+              title="Lock App (Require Username & Password)"
+              className="p-2 rounded-lg text-slate-500 hover:text-blue-600 dark:text-slate-400 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <Lock className="w-4 h-4" />
+            </button>
+          )}
 
           {/* Role switch toggle (Admins only) */}
           {isAdminAccount && (

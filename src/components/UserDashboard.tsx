@@ -20,6 +20,8 @@ import {
   Percent,
   RotateCcw,
   Calculator,
+  MessageSquare,
+  CalendarClock,
 } from 'lucide-react';
 
 import { WithdrawalModal } from './WithdrawalModal';
@@ -40,7 +42,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
   onSelectTransaction,
   onOpenReceipt,
 }) => {
-  const { currentUser, withdrawals, feeConfig, calculateFee, calculateRefundFee } = useFintech();
+  const { currentUser, withdrawals, upcomingWithdrawals, feeConfig, calculateFee, calculateRefundFee } = useFintech();
   const [feePreviewAmountStr, setFeePreviewAmountStr] = useState<string>('5000');
 
   // Internal modal states when not provided as props
@@ -311,6 +313,17 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
               Reserved in-transit / awaiting UTR
             </p>
+            {currentUser.pendingFundNote && (
+              <div className="mt-2.5 p-2 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-800/60 text-[11px] text-amber-800 dark:text-amber-200 flex items-start gap-1.5">
+                <MessageSquare className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                <div className="min-w-0">
+                  <span className="font-bold block text-[10px] uppercase tracking-wide text-amber-700 dark:text-amber-300">
+                    Admin Pending Fund Note
+                  </span>
+                  <span className="break-words">{currentUser.pendingFundNote}</span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -558,6 +571,128 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
         </div>
       </div>
 
+      {/* Upcoming Withdraw List (Scheduled by Admin) */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100 dark:border-slate-800">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+              <CalendarClock className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                  Upcoming Withdraw List
+                </h2>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 border border-indigo-200/70 dark:border-indigo-800/60">
+                  {upcomingWithdrawals.filter((u) => u.status === 'upcoming' || u.status === 'ready').length} Scheduled
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Scheduled withdrawals published by Admin showing exact withdrawal amount and withdrawal charge
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {upcomingWithdrawals.length === 0 ? (
+          <div className="p-6 text-center rounded-xl border border-dashed border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/20">
+            <p className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+              No upcoming withdrawals scheduled at the moment
+            </p>
+            <p className="text-[11px] text-slate-400 mt-1">
+              When Admin schedules an upcoming withdrawal for you, its amount and charge will appear here live.
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+            {upcomingWithdrawals.map((item) => {
+              const statusBadgeClass =
+                item.status === 'ready'
+                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                  : item.status === 'completed'
+                  ? 'bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300'
+                  : item.status === 'cancelled'
+                  ? 'bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300'
+                  : 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300';
+
+              const statusLabel =
+                item.status === 'ready'
+                  ? 'Ready for Payout'
+                  : item.status === 'completed'
+                  ? 'Completed'
+                  : item.status === 'cancelled'
+                  ? 'Cancelled'
+                  : 'Upcoming';
+
+              return (
+                <div
+                  key={item.id}
+                  className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/30 p-4 space-y-3"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <h3 className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                          {item.title}
+                        </h3>
+                        <span
+                          className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                            item.targetUserId === 'ALL'
+                              ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300'
+                              : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200'
+                          }`}
+                        >
+                          {item.targetUserId === 'ALL' ? 'All Users' : 'Personal'}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 font-mono">
+                        Scheduled: {item.scheduledDate} ·{' '}
+                        {item.paymentMethod === 'bank_transfer'
+                          ? 'Bank IMPS/NEFT'
+                          : item.paymentMethod === 'upi'
+                          ? 'UPI Instant'
+                          : 'Bank / UPI'}
+                      </p>
+                    </div>
+                    <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded shrink-0 ${statusBadgeClass}`}>
+                      {statusLabel}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 pt-2.5 border-t border-slate-200/70 dark:border-slate-800 text-xs">
+                    <div>
+                      <span className="text-[10px] text-slate-500 dark:text-slate-400 block">Withdrawal Amount</span>
+                      <span className="font-mono font-bold text-slate-900 dark:text-white">
+                        ₹{item.withdrawalAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-500 dark:text-slate-400 block">Withdrawal Charge</span>
+                      <span className="font-mono font-bold text-rose-600 dark:text-rose-400">
+                        -₹{item.withdrawalCharge.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[10px] text-slate-500 dark:text-slate-400 block">Net Receivable</span>
+                      <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                        ₹{item.netAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                  </div>
+
+                  {item.note && (
+                    <div className="p-2.5 rounded-lg bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-800/50 text-[11px] text-amber-800 dark:text-amber-200 flex items-start gap-1.5">
+                      <MessageSquare className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                      <span className="break-words">{item.note}</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       {/* Transaction History Section */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xs overflow-hidden">
         {/* Table Filter & Search Header */}
@@ -645,6 +780,14 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                     ) : (
                       <div className="text-[11px] font-mono text-slate-400">
                         Ref: {tx.referenceNumber}
+                      </div>
+                    )}
+                    {tx.adminNote && (
+                      <div className="mt-1 inline-flex items-start gap-1 px-2 py-0.5 rounded-md bg-blue-50 dark:bg-blue-950/50 border border-blue-200/70 dark:border-blue-800/50 text-[10px] text-blue-700 dark:text-blue-300 max-w-[220px]">
+                        <MessageSquare className="w-3 h-3 shrink-0 mt-0.5" />
+                        <span className="truncate" title={tx.adminNote}>
+                          {tx.adminNote}
+                        </span>
                       </div>
                     )}
                   </td>

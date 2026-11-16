@@ -69,7 +69,7 @@ service cloud.firestore {
           'availableBalance', 'totalDeposited', 'totalWithdrawn',
           'pendingWithdrawals', 'dailyWithdrawalLimit', 'withdrawnToday',
           'registeredAt', 'bankBeneficiaries', 'upiBeneficiaries',
-          'isFrozen', 'address', 'panNumber', 'createdAt', 'updatedAt'
+          'isFrozen', 'address', 'panNumber', 'pendingFundNote', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.id) &&
         data.id == userId &&
@@ -93,6 +93,7 @@ service cloud.firestore {
         (!('isFrozen' in data) || data.isFrozen is bool) &&
         (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
         (!('panNumber' in data) || (data.panNumber is string && data.panNumber.size() <= 20)) &&
+        (!('pendingFundNote' in data) || (data.pendingFundNote is string && data.pendingFundNote.size() <= 500)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -106,7 +107,7 @@ service cloud.firestore {
         data.keys().hasOnly([
           'id', 'userId', 'userName', 'userEmail', 'amount', 'feeAmount',
           'gstAmount', 'netPayableAmount', 'paymentMethod', 'paymentDetails',
-          'status', 'utrNumber', 'rejectionReason', 'refundFeeAmount', 'refundedAmount',
+          'status', 'utrNumber', 'rejectionReason', 'adminNote', 'refundFeeAmount', 'refundedAmount',
           'statusTimeline', 'referenceNumber', 'completedAt', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.id) &&
@@ -124,6 +125,7 @@ service cloud.firestore {
         data.status in ['pending', 'approved', 'processing', 'completed', 'failed', 'rejected'] &&
         (!('utrNumber' in data) || (data.utrNumber is string && data.utrNumber.size() <= 64)) &&
         (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500)) &&
+        (!('adminNote' in data) || (data.adminNote is string && data.adminNote.size() <= 500)) &&
         (!('refundFeeAmount' in data) || (data.refundFeeAmount is number && data.refundFeeAmount >= 0)) &&
         (!('refundedAmount' in data) || (data.refundedAmount is number && data.refundedAmount >= 0 && data.refundedAmount <= data.amount)) &&
         data.statusTimeline is list && data.statusTimeline.size() >= 1 && data.statusTimeline.size() <= 20 &&
@@ -174,6 +176,21 @@ service cloud.firestore {
         data.require2FA is bool &&
         data.paymentMethods is list && data.paymentMethods.size() <= 10 &&
         (data.paymentMethods.size() == 0 || data.paymentMethods[0] is map) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSecurityConfig(data) {
+      return data.keys().hasAll([
+          'enabled', 'username', 'passwordSalt', 'passwordHash', 'updatedBy', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'enabled', 'username', 'passwordSalt', 'passwordHash', 'updatedBy', 'updatedAt'
+        ]) &&
+        data.enabled is bool &&
+        data.username is string && data.username.size() >= 3 && data.username.size() <= 64 &&
+        data.passwordSalt is string && data.passwordSalt.size() >= 8 && data.passwordSalt.size() <= 64 &&
+        data.passwordHash is string && data.passwordHash.size() == 64 && data.passwordHash.matches('^[a-f0-9]{64}$') &&
+        data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 150 &&
         data.updatedAt is timestamp;
     }
 
@@ -242,6 +259,35 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidUpcomingWithdrawal(data, upcomingId) {
+      return data.keys().hasAll([
+          'id', 'targetUserId', 'targetUserName', 'title',
+          'withdrawalAmount', 'withdrawalCharge', 'netAmount',
+          'scheduledDate', 'paymentMethod', 'status',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'targetUserId', 'targetUserName', 'title',
+          'withdrawalAmount', 'withdrawalCharge', 'netAmount',
+          'scheduledDate', 'paymentMethod', 'status', 'note',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == upcomingId &&
+        isValidId(data.targetUserId) &&
+        data.targetUserName is string && data.targetUserName.size() >= 1 && data.targetUserName.size() <= 100 &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+        data.withdrawalAmount is number && data.withdrawalAmount > 0 &&
+        data.withdrawalCharge is number && data.withdrawalCharge >= 0 && data.withdrawalCharge <= data.withdrawalAmount &&
+        data.netAmount is number && data.netAmount >= 0 && data.netAmount <= data.withdrawalAmount &&
+        data.scheduledDate is string && data.scheduledDate.size() >= 4 && data.scheduledDate.size() <= 50 &&
+        data.paymentMethod in ['upi', 'bank_transfer', 'any'] &&
+        data.status in ['upcoming', 'ready', 'completed', 'cancelled'] &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 500)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     // =========================================================================
     // Collection Match Blocks
     // =========================================================================
@@ -276,6 +322,7 @@ service cloud.firestore {
             incoming().role == 'user' &&
             incoming().kycStatus in ['pending', 'verified'] &&
             (!('isFrozen' in incoming()) || incoming().isFrozen == false) &&
+            !('pendingFundNote' in incoming()) &&
             incoming().availableBalance <= 25000 &&
             incoming().totalDeposited == incoming().availableBalance &&
             incoming().dailyWithdrawalLimit <= 500000 &&
@@ -327,6 +374,7 @@ service cloud.firestore {
             incoming().status == 'pending' &&
             !('utrNumber' in incoming()) &&
             !('rejectionReason' in incoming()) &&
+            !('adminNote' in incoming()) &&
             !('completedAt' in incoming()) &&
             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
             (!('isFrozen' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data) ||
@@ -355,15 +403,16 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(withdrawalId);
     }
 
-    // Platform Fee & Rail Configuration
+    // Platform Fee, Rail & Security Gate Configuration
     match /config/{configId} {
-      allow get: if isVerifiedUser() && configId in ['fees', 'system'];
+      allow get: if isVerifiedUser() && configId in ['fees', 'system', 'security'];
       allow list: if false;
       allow create, update: if isAdmin() &&
-        configId in ['fees', 'system'] &&
+        configId in ['fees', 'system', 'security'] &&
         incoming().updatedAt == request.time && (
           (configId == 'fees' && isValidFeeConfig(incoming())) ||
-          (configId == 'system' && isValidSystemConfig(incoming()))
+          (configId == 'system' && isValidSystemConfig(incoming())) ||
+          (configId == 'security' && isValidSecurityConfig(incoming()))
         );
       allow delete: if false;
     }
@@ -416,6 +465,31 @@ service cloud.firestore {
         );
 
       allow delete: if isVerifiedUser() && isValidId(notificationId) && (existing().userId == request.auth.uid || isAdmin());
+    }
+
+    // Admin-Managed Upcoming Withdraw List
+    match /upcomingWithdrawals/{upcomingId} {
+      allow get: if isVerifiedUser() && isValidId(upcomingId) && (
+        isAdmin() ||
+        existing().targetUserId == request.auth.uid ||
+        existing().targetUserId == 'ALL'
+      );
+      allow list: if isAdmin() || (
+        isVerifiedUser() && (
+          resource.data.targetUserId == request.auth.uid ||
+          resource.data.targetUserId == 'ALL'
+        )
+      );
+      allow create: if isAdmin() && isValidId(upcomingId) &&
+        isValidUpcomingWithdrawal(incoming(), upcomingId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(upcomingId) &&
+        isValidUpcomingWithdrawal(incoming(), upcomingId) &&
+        incoming().id == existing().id &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(upcomingId);
     }
   }
 }

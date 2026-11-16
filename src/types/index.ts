@@ -47,6 +47,7 @@ export interface User {
   isFrozen?: boolean;
   address?: string;
   panNumber?: string;
+  pendingFundNote?: string;
 }
 
 export interface StatusTimelineEvent {
@@ -78,6 +79,7 @@ export interface WithdrawalRequest {
   status: TransactionStatus;
   utrNumber?: string;
   rejectionReason?: string;
+  adminNote?: string;
   refundFeeAmount?: number;
   refundedAmount?: number;
   statusTimeline: StatusTimelineEvent[];
@@ -165,3 +167,29 @@ export interface AdminLog {
   ipAddress: string;
 }
 
+export type UpcomingWithdrawalStatus = 'upcoming' | 'ready' | 'completed' | 'cancelled';
+
+export interface UpcomingWithdrawal {
+  id: string;
+  targetUserId: string; // 'ALL' for broadcast or specific user ID
+  targetUserName: string;
+  title: string;
+  withdrawalAmount: number;
+  withdrawalCharge: number;
+  netAmount: number;
+  scheduledDate: string;
+  paymentMethod: 'upi' | 'bank_transfer' | 'any';
+  status: UpcomingWithdrawalStatus;
+  note?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AppSecurityConfig {
+  enabled: boolean;
+  username: string;
+  passwordSalt: string;
+  passwordHash: string;
+  updatedBy: string;
+  updatedAt?: string;
+}

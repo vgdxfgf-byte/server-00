@@ -11,10 +11,13 @@ import {
   ArrowLeft,
   AlertOctagon,
   CheckCircle2,
+  CalendarClock,
+  Lock,
+  KeyRound,
 } from 'lucide-react';
 import { sound } from '../utils/audio';
 
-export type AdminSection = 'overview' | 'withdrawals' | 'balances' | 'users' | 'settings' | 'logs';
+export type AdminSection = 'overview' | 'withdrawals' | 'upcoming' | 'balances' | 'users' | 'settings' | 'security' | 'logs';
 
 interface AdminSidebarProps {
   currentSection: AdminSection;
@@ -27,10 +30,13 @@ export const AdminSidebar: React.FC<AdminSidebarProps> = ({
   onSelectSection,
   onExitAdmin,
 }) => {
-  const { withdrawals, systemConfig, toggleWithdrawalsEnabled, users } = useFintech();
+  const { withdrawals, upcomingWithdrawals, systemConfig, toggleWithdrawalsEnabled, users, securityConfig, lockApp } = useFintech();
 
   const pendingCount = withdrawals.filter((w) => w.status === 'pending').length;
   const approvedCount = withdrawals.filter((w) => w.status === 'approved').length;
+  const activeUpcomingCount = upcomingWithdrawals.filter(
+    (u) => u.status === 'upcoming' || u.status === 'ready'
+  ).length;
 
   const navItems = [
     {
@@ -43,6 +49,12 @@ export const AdminSidebar: React.FC<AdminSidebarProps> = ({
       label: 'Withdrawal Queue',
       icon: Clock,
       badge: pendingCount + approvedCount > 0 ? pendingCount + approvedCount : undefined,
+    },
+    {
+      id: 'upcoming' as AdminSection,
+      label: 'Upcoming Withdraw List',
+      icon: CalendarClock,
+      badge: activeUpcomingCount > 0 ? activeUpcomingCount : undefined,
     },
     {
       id: 'balances' as AdminSection,
@@ -60,6 +72,11 @@ export const AdminSidebar: React.FC<AdminSidebarProps> = ({
       id: 'settings' as AdminSection,
       label: 'Limits & Gateway Fees',
       icon: Settings,
+    },
+    {
+      id: 'security' as AdminSection,
+      label: 'Security & Password',
+      icon: KeyRound,
     },
     {
       id: 'logs' as AdminSection,
@@ -165,8 +182,17 @@ export const AdminSidebar: React.FC<AdminSidebarProps> = ({
         })}
       </nav>
 
-      {/* Return to User Interface Button */}
-      <div className="p-4 border-t border-slate-200 dark:border-slate-800">
+      {/* Return to User Interface & Lock Controls */}
+      <div className="p-4 border-t border-slate-200 dark:border-slate-800 space-y-2">
+        {securityConfig.enabled && (
+          <button
+            onClick={lockApp}
+            className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-950/40 dark:hover:text-blue-300 text-xs font-semibold text-slate-700 dark:text-slate-300 transition-colors cursor-pointer"
+          >
+            <Lock className="w-3.5 h-3.5" />
+            <span>Lock App Screen</span>
+          </button>
+        )}
         <button
           onClick={() => {
             sound.playClick();
