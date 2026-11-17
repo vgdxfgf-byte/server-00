@@ -10,7 +10,18 @@ import { ApkGuideModal } from './components/ApkGuideModal';
 import { TransactionReceiptModal } from './components/TransactionReceiptModal';
 import { TransactionDetailsDrawer } from './components/TransactionDetailsDrawer';
 import { WithdrawalRequest } from './types';
-import { ShieldCheck, ArrowRight, RotateCw, AlertTriangle, Lock, User as UserIcon, Eye, EyeOff } from 'lucide-react';
+import {
+  ShieldCheck,
+  ArrowRight,
+  RotateCw,
+  AlertTriangle,
+  Lock,
+  User as UserIcon,
+  Eye,
+  EyeOff,
+  KeyRound,
+  RotateCcw,
+} from 'lucide-react';
 
 class AppErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -50,7 +61,17 @@ class AppErrorBoundary extends React.Component<
 }
 
 function AppSecurityGate() {
-  const { unlockAppWithCredentials } = useFintech();
+  const {
+    unlockAppWithCredentials,
+    firebaseUser,
+    isAdminAccount,
+    signInWithGoogle,
+    logout,
+    authError,
+    securityConfig,
+    updateAppSecurityConfig,
+    resetAppSecurityToDefault,
+  } = useFintech();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -59,6 +80,39 @@ function AppSecurityGate() {
   const [failedAttempts, setFailedAttempts] = useState(0);
   const [cooldownUntil, setCooldownUntil] = useState<number>(0);
   const [secondsLeft, setSecondsLeft] = useState<number>(0);
+
+  // Admin Recovery / Reset Username & Password Mode
+  const [resetMode, setResetMode] = useState<boolean>(() => {
+    try {
+      return typeof window !== 'undefined' && window.sessionStorage.getItem('pf_security_reset_mode') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const setResetModePersisted = (val: boolean) => {
+    setResetMode(val);
+    try {
+      if (typeof window !== 'undefined') {
+        if (val) {
+          window.sessionStorage.setItem('pf_security_reset_mode', '1');
+        } else {
+          window.sessionStorage.removeItem('pf_security_reset_mode');
+        }
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  };
+  const [newSecUsername, setNewSecUsername] = useState(securityConfig.username || 'server03');
+  const [newSecPassword, setNewSecPassword] = useState('');
+  const [confirmSecPassword, setConfirmSecPassword] = useState('');
+  const [showNewSecPassword, setShowNewSecPassword] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetFeedback, setResetFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  React.useEffect(() => {
+    setNewSecUsername(securityConfig.username || 'server03');
+  }, [securityConfig.username]);
 
   React.useEffect(() => {
     if (!cooldownUntil || cooldownUntil <= Date.now()) {
@@ -101,6 +155,68 @@ function AppSecurityGate() {
     }
   };
 
+  const handleAdminVerifyGoogle = async () => {
+    setResetFeedback(null);
+    setResetBusy(true);
+    try {
+      if (firebaseUser && !isAdminAccount) {
+        await logout();
+      }
+      await signInWithGoogle();
+    } finally {
+      setResetBusy(false);
+    }
+  };
+
+  const handleResetCredentialsSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setResetFeedback(null);
+    const cleanUser = newSecUsername.trim();
+    if (cleanUser.length < 3) {
+      setResetFeedback({ type: 'error', message: 'New security username must be at least 3 characters.' });
+      return;
+    }
+    if (newSecPassword.length < 6) {
+      setResetFeedback({ type: 'error', message: 'New security password must be at least 6 characters.' });
+      return;
+    }
+    if (newSecPassword !== confirmSecPassword) {
+      setResetFeedback({ type: 'error', message: 'New password and confirmation password do not match.' });
+      return;
+    }
+
+    setResetBusy(true);
+    try {
+      const res = await updateAppSecurityConfig({
+        enabled: true,
+        username: cleanUser,
+        newPassword: newSecPassword,
+      });
+      if (!res.success) {
+        setResetFeedback({ type: 'error', message: res.error || 'Failed to reset credentials.' });
+      } else {
+        setResetModePersisted(false);
+      }
+    } finally {
+      setResetBusy(false);
+    }
+  };
+
+  const handleRestoreDefaultFromGate = async () => {
+    setResetFeedback(null);
+    setResetBusy(true);
+    try {
+      const res = await resetAppSecurityToDefault({ autoUnlock: true });
+      if (!res.success) {
+        setResetFeedback({ type: 'error', message: res.error || 'Failed to restore default credentials.' });
+      } else {
+        setResetModePersisted(false);
+      }
+    } finally {
+      setResetBusy(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4">
       <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl space-y-6">
@@ -111,98 +227,276 @@ function AppSecurityGate() {
             </span>
             <div>
               <h1 className="text-xl font-bold tracking-tight text-white">Server 03 · PayFlow</h1>
-              <p className="text-xs text-slate-400">Security Access Gate</p>
+              <p className="text-xs text-slate-400">
+                {resetMode ? 'Admin Security Credential Reset' : 'Security Access Gate'}
+              </p>
             </div>
           </div>
           <div className="w-9 h-9 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400 flex items-center justify-center">
-            <Lock className="w-4 h-4" />
+            {resetMode ? <KeyRound className="w-4 h-4" /> : <Lock className="w-4 h-4" />}
           </div>
         </div>
 
-        <div className="space-y-1.5">
-          <h2 className="text-base font-semibold text-white">Enter Security Credentials</h2>
-          <p className="text-xs text-slate-400 leading-relaxed">
-            This application is protected. Enter your authorized security username and password to open Server 03 · PayFlow.
-          </p>
-        </div>
-
-        {errorMsg && (
-          <div className="p-3 rounded-xl bg-rose-950/50 border border-rose-800/60 text-xs text-rose-300 font-medium">
-            {errorMsg}
-          </div>
-        )}
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-              Security Username
-            </label>
-            <div className="relative">
-              <UserIcon className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                autoComplete="username"
-                autoFocus
-                required
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="Enter security username"
-                className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-slate-950/80 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-              />
+        {!resetMode ? (
+          <>
+            <div className="space-y-1.5">
+              <h2 className="text-base font-semibold text-white">Enter Security Credentials</h2>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                This application is protected. Enter your authorized security username and password to open Server 03 · PayFlow.
+              </p>
             </div>
-          </div>
 
-          <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-              Security Password
-            </label>
-            <div className="relative">
-              <Lock className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
-              <input
-                type={showPassword ? 'text' : 'password'}
-                autoComplete="current-password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter security password"
-                className="w-full pl-10 pr-10 py-2.5 rounded-xl bg-slate-950/80 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-              />
+            {errorMsg && (
+              <div className="p-3 rounded-xl bg-rose-950/50 border border-rose-800/60 text-xs text-rose-300 font-medium">
+                {errorMsg}
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  Security Username
+                </label>
+                <div className="relative">
+                  <UserIcon className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    autoComplete="username"
+                    autoFocus
+                    required
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="Enter security username"
+                    className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-slate-950/80 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  Security Password
+                </label>
+                <div className="relative">
+                  <Lock className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    autoComplete="current-password"
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Enter security password"
+                    className="w-full pl-10 pr-10 py-2.5 rounded-xl bg-slate-950/80 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((prev) => !prev)}
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={submitting || secondsLeft > 0}
+                className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-semibold text-sm rounded-xl shadow-md transition-colors cursor-pointer flex items-center justify-center gap-2"
+              >
+                {submitting ? (
+                  <>
+                    <RotateCw className="w-4 h-4 animate-spin" />
+                    <span>Verifying...</span>
+                  </>
+                ) : secondsLeft > 0 ? (
+                  <span>Locked for {secondsLeft}s</span>
+                ) : (
+                  <>
+                    <ShieldCheck className="w-4 h-4" />
+                    <span>Unlock Application</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
+              </button>
+            </form>
+
+            <div className="pt-2 border-t border-slate-800 flex flex-col items-center gap-2">
               <button
                 type="button"
-                onClick={() => setShowPassword((prev) => !prev)}
-                aria-label={showPassword ? 'Hide password' : 'Show password'}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                onClick={() => {
+                  setResetFeedback(null);
+                  setErrorMsg(null);
+                  setResetModePersisted(true);
+                }}
+                className="text-xs font-semibold text-blue-400 hover:text-blue-300 hover:underline cursor-pointer inline-flex items-center gap-1.5"
               >
-                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>Forgot or Reset New Username &amp; Password</span>
               </button>
+              <p className="text-[11px] text-slate-500 text-center">
+                Credentials can also be changed anytime inside Super Admin → Security &amp; Password
+              </p>
             </div>
-          </div>
+          </>
+        ) : (
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <h2 className="text-base font-semibold text-white">Reset New Username &amp; Password</h2>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Verify your Super Admin Google account to set a brand-new app-open username and password.
+              </p>
+            </div>
 
-          <button
-            type="submit"
-            disabled={submitting || secondsLeft > 0}
-            className="w-full py-3 px-4 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-semibold text-sm rounded-xl shadow-md transition-colors cursor-pointer flex items-center justify-center gap-2"
-          >
-            {submitting ? (
-              <>
-                <RotateCw className="w-4 h-4 animate-spin" />
-                <span>Verifying...</span>
-              </>
-            ) : secondsLeft > 0 ? (
-              <span>Locked for {secondsLeft}s</span>
-            ) : (
-              <>
-                <ShieldCheck className="w-4 h-4" />
-                <span>Unlock Application</span>
-                <ArrowRight className="w-4 h-4" />
-              </>
+            {(resetFeedback || authError) && (
+              <div
+                className={`p-3 rounded-xl text-xs font-medium border ${
+                  resetFeedback?.type === 'success'
+                    ? 'bg-emerald-950/50 border-emerald-800/60 text-emerald-300'
+                    : 'bg-rose-950/50 border-rose-800/60 text-rose-300'
+                }`}
+              >
+                {resetFeedback?.message || authError}
+              </div>
             )}
-          </button>
-        </form>
 
-        <p className="text-[11px] text-slate-500 text-center">
-          Credentials can be updated anytime in Super Admin → Limits, Fees &amp; Security
-        </p>
+            {!firebaseUser ? (
+              <div className="space-y-3 p-4 rounded-xl bg-slate-950/70 border border-slate-800">
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Sign in with your authorized Super Admin Google account to verify ownership before resetting the security gate.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleAdminVerifyGoogle}
+                  disabled={resetBusy}
+                  className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white text-xs font-bold transition cursor-pointer flex items-center justify-center gap-2"
+                >
+                  {resetBusy ? (
+                    <>
+                      <RotateCw className="w-4 h-4 animate-spin" />
+                      <span>Connecting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <ShieldCheck className="w-4 h-4" />
+                      <span>Verify Super Admin with Google</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            ) : !isAdminAccount ? (
+              <div className="space-y-3 p-4 rounded-xl bg-rose-950/30 border border-rose-800/50">
+                <p className="text-xs text-rose-200 leading-relaxed">
+                  Signed in as <strong className="font-mono">{firebaseUser.email}</strong>. Only the verified Super Admin account can reset app security credentials.
+                </p>
+                <button
+                  type="button"
+                  onClick={handleAdminVerifyGoogle}
+                  disabled={resetBusy}
+                  className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold transition cursor-pointer"
+                >
+                  Switch Google Account
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleResetCredentialsSubmit} className="space-y-3.5">
+                <div className="p-2.5 rounded-xl bg-emerald-950/40 border border-emerald-800/50 text-[11px] text-emerald-300 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 shrink-0" />
+                  <span>
+                    Admin verified: <strong className="font-mono">{firebaseUser.email}</strong>
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    New Security Username
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    minLength={3}
+                    maxLength={64}
+                    value={newSecUsername}
+                    onChange={(e) => setNewSecUsername(e.target.value)}
+                    placeholder="Enter new username (min 3 chars)"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950/80 border border-slate-700 text-sm text-white font-mono placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    New Security Password
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showNewSecPassword ? 'text' : 'password'}
+                      required
+                      minLength={6}
+                      maxLength={64}
+                      value={newSecPassword}
+                      onChange={(e) => setNewSecPassword(e.target.value)}
+                      placeholder="Enter new password (min 6 chars)"
+                      className="w-full pl-3.5 pr-10 py-2.5 rounded-xl bg-slate-950/80 border border-slate-700 text-sm text-white font-mono placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowNewSecPassword((prev) => !prev)}
+                      aria-label={showNewSecPassword ? 'Hide password' : 'Show password'}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                    >
+                      {showNewSecPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Confirm New Password
+                  </label>
+                  <input
+                    type={showNewSecPassword ? 'text' : 'password'}
+                    required
+                    minLength={6}
+                    maxLength={64}
+                    value={confirmSecPassword}
+                    onChange={(e) => setConfirmSecPassword(e.target.value)}
+                    placeholder="Re-enter new password"
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950/80 border border-slate-700 text-sm text-white font-mono placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={resetBusy}
+                  className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-bold text-xs shadow-sm transition cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>{resetBusy ? 'Resetting...' : 'Save New Username & Password & Unlock'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleRestoreDefaultFromGate}
+                  disabled={resetBusy}
+                  className="w-full py-2 px-4 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 font-semibold text-xs transition cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Restore Factory Default (server03)</span>
+                </button>
+              </form>
+            )}
+
+            <button
+              type="button"
+              onClick={() => {
+                setResetFeedback(null);
+                setResetModePersisted(false);
+              }}
+              className="w-full py-2 text-xs font-semibold text-slate-400 hover:text-white cursor-pointer"
+            >
+              ← Back to Unlock Screen
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -58,6 +58,7 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
     deleteUpcomingWithdrawal,
     securityConfig,
     updateAppSecurityConfig,
+    resetAppSecurityToDefault,
     lockApp,
     updateFeeConfig,
     toggleWithdrawalsEnabled,
@@ -159,6 +160,7 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
   const [secShowPasswords, setSecShowPasswords] = useState<boolean>(false);
   const [secSaving, setSecSaving] = useState<boolean>(false);
   const [secFeedback, setSecFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [confirmResetDefaultSec, setConfirmResetDefaultSec] = useState<boolean>(false);
 
   React.useEffect(() => {
     setSecEnabled(securityConfig.enabled);
@@ -483,7 +485,11 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
   const handleSaveSecurityGate = async (e: React.FormEvent) => {
     e.preventDefault();
     setSecFeedback(null);
-    if (secNewPassword.trim() && secNewPassword !== secConfirmPassword) {
+    if (secNewPassword.length > 0 && secNewPassword.length < 6) {
+      setSecFeedback({ type: 'error', message: 'New security password must be at least 6 characters.' });
+      return;
+    }
+    if (secNewPassword.length > 0 && secNewPassword !== secConfirmPassword) {
       setSecFeedback({ type: 'error', message: 'New password and confirmation password do not match.' });
       return;
     }
@@ -492,18 +498,41 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
       const res = await updateAppSecurityConfig({
         enabled: secEnabled,
         username: secUsername,
-        newPassword: secNewPassword.trim() || undefined,
+        newPassword: secNewPassword.length > 0 ? secNewPassword : undefined,
       });
       if (res.success) {
         setSecNewPassword('');
         setSecConfirmPassword('');
+        setConfirmResetDefaultSec(false);
         setSecFeedback({
           type: 'success',
-          message: 'App-Open Security Username & Password settings saved and synced live.',
+          message: 'New Security Username & Password saved and synced live across devices.',
         });
-        setTimeout(() => setSecFeedback(null), 4000);
+        setTimeout(() => setSecFeedback(null), 5000);
       } else {
         setSecFeedback({ type: 'error', message: res.error || 'Failed to update security settings.' });
+      }
+    } finally {
+      setSecSaving(false);
+    }
+  };
+
+  const handleResetSecurityToDefault = async () => {
+    setSecFeedback(null);
+    setSecSaving(true);
+    try {
+      const res = await resetAppSecurityToDefault({ autoUnlock: true });
+      if (res.success) {
+        setSecNewPassword('');
+        setSecConfirmPassword('');
+        setConfirmResetDefaultSec(false);
+        setSecFeedback({
+          type: 'success',
+          message: 'Reset to default credentials (Username: server03 · Password: PayFlow@2026) and synced live.',
+        });
+        setTimeout(() => setSecFeedback(null), 6000);
+      } else {
+        setSecFeedback({ type: 'error', message: res.error || 'Failed to reset security credentials.' });
       }
     } finally {
       setSecSaving(false);
@@ -2229,7 +2258,39 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                   Active username: <strong className="font-mono text-slate-700 dark:text-slate-200">{securityConfig.username}</strong>
                   {' · '}Updated by {securityConfig.updatedBy}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  {!confirmResetDefaultSec ? (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmResetDefaultSec(true)}
+                      disabled={secSaving}
+                      className="py-2 px-3.5 rounded-xl border border-amber-200 dark:border-amber-800/70 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 dark:hover:bg-amber-900/50 text-xs font-semibold text-amber-800 dark:text-amber-300 cursor-pointer inline-flex items-center gap-1.5"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Reset to Default</span>
+                    </button>
+                  ) : (
+                    <div className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-700">
+                      <span className="text-[11px] font-semibold text-amber-800 dark:text-amber-200">
+                        Restore default?
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleResetSecurityToDefault}
+                        disabled={secSaving}
+                        className="px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-bold cursor-pointer"
+                      >
+                        Confirm
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmResetDefaultSec(false)}
+                        className="px-2 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[11px] font-semibold cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
                   {securityConfig.enabled && (
                     <button
                       type="button"
@@ -2245,7 +2306,7 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                     disabled={secSaving}
                     className="py-2.5 px-5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-bold text-xs shadow-sm transition cursor-pointer"
                   >
-                    {secSaving ? 'Saving...' : 'Save New Password & Settings'}
+                    {secSaving ? 'Saving...' : 'Reset / Save New Credentials'}
                   </button>
                 </div>
               </div>

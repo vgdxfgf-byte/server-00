@@ -203,6 +203,9 @@ interface FintechContextType {
     username: string;
     newPassword?: string;
   }) => Promise<{ success: boolean; error?: string }>;
+  resetAppSecurityToDefault: (options?: {
+    autoUnlock?: boolean;
+  }) => Promise<{ success: boolean; error?: string }>;
 
   // Utilities
   resetToDefault: () => void;
@@ -2141,13 +2144,14 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     let nextSalt = securityConfig.passwordSalt;
     let nextHash = securityConfig.passwordHash;
-    const trimmedPassword = newPassword?.trim() || '';
-    if (trimmedPassword.length > 0) {
-      if (trimmedPassword.length < 6) {
+    const rawPassword = newPassword ?? '';
+    const hasNewPassword = rawPassword.length > 0;
+    if (hasNewPassword) {
+      if (rawPassword.length < 6) {
         return { success: false, error: 'New security password must be at least 6 characters.' };
       }
       nextSalt = generateSalt();
-      nextHash = await hashSecurityPassword(trimmedPassword, nextSalt);
+      nextHash = await hashSecurityPassword(rawPassword, nextSalt);
     }
 
     const updatedBy = (firebaseUser?.email || currentUser.name || 'Super Admin').slice(0, 150);
@@ -2162,6 +2166,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     sound.playSuccess();
     unlockedWithHashRef.current = nextHash;
+    setAppSecurityUnlocked(true);
     setSecurityConfig(nextLocal);
     try {
       localStorage.setItem(`${STORAGE_KEY_PREFIX}security_gate`, JSON.stringify(nextLocal));
@@ -2185,8 +2190,59 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     writeAdminLogDoc(
       'UPDATE_APP_SECURITY_GATE',
       `Updated App-Open Security Gate: status=${enabled ? 'ENABLED' : 'DISABLED'}, username="${cleanUsername}"${
-        trimmedPassword ? ' (password rotated)' : ''
+        hasNewPassword ? ' (password rotated)' : ''
       }.`
+    );
+
+    return { success: true };
+  };
+
+  const resetAppSecurityToDefault = async (options?: { autoUnlock?: boolean }) => {
+    if (!isAdminAccount) {
+      return { success: false, error: 'Only Super Admin can reset app-open security credentials.' };
+    }
+    const autoUnlock = options?.autoUnlock !== false;
+    const updatedBy = (firebaseUser?.email || currentUser.name || 'Super Admin').slice(0, 150);
+    const nextLocal: AppSecurityConfig = {
+      enabled: true,
+      username: DEFAULT_SECURITY_CONFIG.username,
+      passwordSalt: DEFAULT_SECURITY_CONFIG.passwordSalt,
+      passwordHash: DEFAULT_SECURITY_CONFIG.passwordHash,
+      updatedBy,
+      updatedAt: new Date().toISOString(),
+    };
+
+    sound.playSuccess();
+    if (autoUnlock) {
+      unlockedWithHashRef.current = DEFAULT_SECURITY_CONFIG.passwordHash;
+      setAppSecurityUnlocked(true);
+    } else {
+      unlockedWithHashRef.current = null;
+      setAppSecurityUnlocked(false);
+    }
+    setSecurityConfig(nextLocal);
+    try {
+      localStorage.setItem(`${STORAGE_KEY_PREFIX}security_gate`, JSON.stringify(nextLocal));
+    } catch {
+      // Ignore storage quota errors
+    }
+
+    try {
+      await setDoc(doc(db, 'config', 'security'), {
+        enabled: true,
+        username: DEFAULT_SECURITY_CONFIG.username,
+        passwordSalt: DEFAULT_SECURITY_CONFIG.passwordSalt,
+        passwordHash: DEFAULT_SECURITY_CONFIG.passwordHash,
+        updatedBy,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'config/security');
+    }
+
+    writeAdminLogDoc(
+      'RESET_APP_SECURITY_GATE',
+      `Reset App-Open Security Gate to default username ("${DEFAULT_SECURITY_CONFIG.username}") and default password.`
     );
 
     return { success: true };
@@ -2542,6 +2598,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
         unlockAppWithCredentials,
         lockApp,
         updateAppSecurityConfig,
+        resetAppSecurityToDefault,
         resetToDefault,
       }}
     >
