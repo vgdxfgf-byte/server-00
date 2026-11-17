@@ -104,11 +104,11 @@
         },
         "bankBeneficiaries": {
           "type": "array",
-          "description": "Bounded list (max 10) of linked bank accounts."
+          "description": "Admin-managed bounded list (max 10) of linked bank accounts."
         },
         "upiBeneficiaries": {
           "type": "array",
-          "description": "Bounded list (max 10) of linked UPI VPAs."
+          "description": "Admin-managed bounded list (max 10) of linked UPI VPAs."
         },
         "isFrozen": {
           "type": "boolean",
@@ -254,6 +254,13 @@
           "description": "Internal gateway channel reference.",
           "minLength": 1,
           "maxLength": 64
+        },
+        "upcomingWithdrawalId": {
+          "type": "string",
+          "description": "ID of the Admin-published upcomingWithdrawals item authorizing this withdrawal.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
         "completedAt": {
           "type": "string",

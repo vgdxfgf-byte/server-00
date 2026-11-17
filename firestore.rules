@@ -108,7 +108,7 @@ service cloud.firestore {
           'id', 'userId', 'userName', 'userEmail', 'amount', 'feeAmount',
           'gstAmount', 'netPayableAmount', 'paymentMethod', 'paymentDetails',
           'status', 'utrNumber', 'rejectionReason', 'adminNote', 'refundFeeAmount', 'refundedAmount',
-          'statusTimeline', 'referenceNumber', 'completedAt', 'createdAt', 'updatedAt'
+          'statusTimeline', 'referenceNumber', 'upcomingWithdrawalId', 'completedAt', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.id) &&
         data.id == withdrawalId &&
@@ -131,6 +131,7 @@ service cloud.firestore {
         data.statusTimeline is list && data.statusTimeline.size() >= 1 && data.statusTimeline.size() <= 20 &&
         data.statusTimeline[0] is map &&
         data.referenceNumber is string && data.referenceNumber.size() >= 1 && data.referenceNumber.size() <= 64 &&
+        (!('upcomingWithdrawalId' in data) || isValidId(data.upcomingWithdrawalId)) &&
         (!('completedAt' in data) || (data.completedAt is string && data.completedAt.size() <= 50)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -308,7 +309,7 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(adminId) && adminId != request.auth.uid;
     }
 
-    // User Financial Profiles (Strict PII Isolation)
+    // User Financial Profiles (Strict PII Isolation; Only Admin Manages Beneficiaries)
     match /users/{userId} {
       allow get: if isVerifiedUser() && isValidId(userId) && (isOwner(userId) || isAdmin());
       allow list: if isAdmin() || (isVerifiedUser() && resource.data.id == request.auth.uid);
@@ -323,6 +324,8 @@ service cloud.firestore {
             incoming().kycStatus in ['pending', 'verified'] &&
             (!('isFrozen' in incoming()) || incoming().isFrozen == false) &&
             !('pendingFundNote' in incoming()) &&
+            incoming().bankBeneficiaries.size() == 0 &&
+            incoming().upiBeneficiaries.size() == 0 &&
             incoming().availableBalance <= 25000 &&
             incoming().totalDeposited == incoming().availableBalance &&
             incoming().dailyWithdrawalLimit <= 500000 &&
@@ -339,11 +342,9 @@ service cloud.firestore {
         incoming().updatedAt == request.time && (
           isAdmin() || (
             isOwner(userId) && (
-              // Action 1: Update personal profile fields only
+              // Action 1: Update personal profile fields only (beneficiaries are Admin-only)
               incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'address', 'panNumber', 'avatarUrl', 'updatedAt']) ||
-              // Action 2: Manage linked payout beneficiaries only
-              incoming().diff(existing()).affectedKeys().hasOnly(['bankBeneficiaries', 'upiBeneficiaries', 'updatedAt']) ||
-              // Action 3: Reserve funds during an atomic withdrawal batch
+              // Action 2: Reserve funds during an atomic withdrawal batch
               (
                 (!('isFrozen' in existing()) || existing().isFrozen == false) &&
                 incoming().diff(existing()).affectedKeys().hasOnly(['availableBalance', 'pendingWithdrawals', 'withdrawnToday', 'updatedAt']) &&
@@ -361,6 +362,7 @@ service cloud.firestore {
     }
 
     // Withdrawal Requests & Settlement Lifecycle
+    // Non-admin users can only withdraw items from Admin's upcomingWithdrawals list using Admin-assigned beneficiaries
     match /withdrawals/{withdrawalId} {
       allow get: if isVerifiedUser() && isValidId(withdrawalId) && (existing().userId == request.auth.uid || isAdmin());
       allow list: if isAdmin() || (isVerifiedUser() && resource.data.userId == request.auth.uid);
@@ -376,9 +378,37 @@ service cloud.firestore {
             !('rejectionReason' in incoming()) &&
             !('adminNote' in incoming()) &&
             !('completedAt' in incoming()) &&
+            'upcomingWithdrawalId' in incoming() &&
+            isValidId(incoming().upcomingWithdrawalId) &&
+            exists(/databases/$(database)/documents/upcomingWithdrawals/$(incoming().upcomingWithdrawalId)) &&
+            get(/databases/$(database)/documents/upcomingWithdrawals/$(incoming().upcomingWithdrawalId)).data.status in ['upcoming', 'ready'] &&
+            (
+              get(/databases/$(database)/documents/upcomingWithdrawals/$(incoming().upcomingWithdrawalId)).data.targetUserId == 'ALL' ||
+              get(/databases/$(database)/documents/upcomingWithdrawals/$(incoming().upcomingWithdrawalId)).data.targetUserId == request.auth.uid
+            ) &&
+            incoming().amount == get(/databases/$(database)/documents/upcomingWithdrawals/$(incoming().upcomingWithdrawalId)).data.withdrawalAmount &&
+            incoming().feeAmount == get(/databases/$(database)/documents/upcomingWithdrawals/$(incoming().upcomingWithdrawalId)).data.withdrawalCharge &&
+            incoming().gstAmount == 0 &&
+            incoming().netPayableAmount == get(/databases/$(database)/documents/upcomingWithdrawals/$(incoming().upcomingWithdrawalId)).data.netAmount &&
+            (
+              get(/databases/$(database)/documents/upcomingWithdrawals/$(incoming().upcomingWithdrawalId)).data.paymentMethod == 'any' ||
+              incoming().paymentMethod == get(/databases/$(database)/documents/upcomingWithdrawals/$(incoming().upcomingWithdrawalId)).data.paymentMethod
+            ) &&
             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
             (!('isFrozen' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data) ||
               get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isFrozen == false) &&
+            (
+              (
+                incoming().paymentMethod == 'upi' &&
+                get(/databases/$(database)/documents/users/$(request.auth.uid)).data.upiBeneficiaries.size() > 0 &&
+                incoming().paymentDetails.keys().hasAll(['upiId'])
+              ) ||
+              (
+                incoming().paymentMethod == 'bank_transfer' &&
+                get(/databases/$(database)/documents/users/$(request.auth.uid)).data.bankBeneficiaries.size() > 0 &&
+                incoming().paymentDetails.keys().hasAll(['accountNumber', 'ifscCode'])
+              )
+            ) &&
             getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.availableBalance ==
               get(/databases/$(database)/documents/users/$(request.auth.uid)).data.availableBalance - incoming().amount &&
             getAfter(/databases/$(database)/documents/users/$(request.auth.uid)).data.pendingWithdrawals ==

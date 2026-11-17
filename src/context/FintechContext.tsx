@@ -96,9 +96,9 @@ interface FintechContextType {
   calculateFee: (amount: number) => CalculateFeeResult;
   calculateRefundFee: (amount: number) => { refundFeeAmount: number; netRefundAmount: number };
   requestWithdrawal: (params: {
-    amount: number;
+    upcomingWithdrawalId: string;
     paymentMethod: PaymentMethodType;
-    paymentDetails: WithdrawalRequest['paymentDetails'];
+    beneficiaryId: string;
   }) => {
     success: boolean;
     error?: string;
@@ -176,8 +176,14 @@ interface FintechContextType {
   registerNewUser: (name: string, email: string, phone: string) => { success: boolean; error?: string; user?: User };
 
   // Beneficiaries
-  addBankBeneficiary: (beneficiary: Omit<BankBeneficiary, 'id'>) => void;
-  addUpiBeneficiary: (beneficiary: Omit<UpiBeneficiary, 'id'>) => void;
+  addBankBeneficiary: (
+    userId: string,
+    beneficiary: Omit<BankBeneficiary, 'id'>
+  ) => { success: boolean; error?: string };
+  addUpiBeneficiary: (
+    userId: string,
+    beneficiary: Omit<UpiBeneficiary, 'id'>
+  ) => { success: boolean; error?: string };
   deletePayoutAccount: (
     userId: string,
     accountType: 'bank' | 'upi',
@@ -312,6 +318,8 @@ function mapDocToWithdrawal(id: string, data: Record<string, unknown>): Withdraw
     updatedAt: toIsoString(data.updatedAt),
     completedAt: data.completedAt ? toIsoString(data.completedAt) : undefined,
     referenceNumber: String(data.referenceNumber || id),
+    upcomingWithdrawalId:
+      typeof data.upcomingWithdrawalId === 'string' ? data.upcomingWithdrawalId : undefined,
   };
 }
 
@@ -1064,15 +1072,15 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
   };
 
-  // Request Withdrawal (Atomic Batch: reserves user balance + creates pending withdrawal doc)
+  // Request Withdrawal (Strictly from Admin-given Withdrawal List + Admin-assigned Beneficiary Account)
   const requestWithdrawal = ({
-    amount,
+    upcomingWithdrawalId,
     paymentMethod,
-    paymentDetails,
+    beneficiaryId,
   }: {
-    amount: number;
+    upcomingWithdrawalId: string;
     paymentMethod: PaymentMethodType;
-    paymentDetails: WithdrawalRequest['paymentDetails'];
+    beneficiaryId: string;
   }) => {
     if (!systemConfig.withdrawalsEnabled) {
       sound.playWarning();
@@ -1098,21 +1106,91 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       return { success: false, error: 'Your account is currently restricted. Please contact compliance.' };
     }
 
-    if (amount < feeConfig.minWithdrawalAmount) {
+    const upcomingItem = upcomingWithdrawals.find((item) => item.id === upcomingWithdrawalId);
+    if (
+      !upcomingItem ||
+      (upcomingItem.targetUserId !== 'ALL' && upcomingItem.targetUserId !== currentUser.id)
+    ) {
       sound.playWarning();
       return {
         success: false,
-        error: `Minimum withdrawal amount is ₹${feeConfig.minWithdrawalAmount.toLocaleString('en-IN')}.`,
+        error: 'Only withdrawals authorized by Super Admin in the Withdrawal List can be withdrawn.',
       };
     }
 
-    if (amount > feeConfig.maxWithdrawalAmountPerTxn) {
+    if (upcomingItem.status !== 'upcoming' && upcomingItem.status !== 'ready') {
       sound.playWarning();
       return {
         success: false,
-        error: `Maximum withdrawal per transaction is ₹${feeConfig.maxWithdrawalAmountPerTxn.toLocaleString('en-IN')}.`,
+        error: `This withdrawal list item (${upcomingItem.title}) is ${upcomingItem.status} and cannot be withdrawn.`,
       };
     }
+
+    const alreadyWithdrawn = withdrawals.some(
+      (w) =>
+        w.userId === currentUser.id &&
+        w.upcomingWithdrawalId === upcomingItem.id &&
+        w.status !== 'rejected' &&
+        w.status !== 'failed'
+    );
+    if (alreadyWithdrawn) {
+      sound.playWarning();
+      return {
+        success: false,
+        error: 'You have already submitted a withdrawal for this item from the Withdrawal List.',
+      };
+    }
+
+    if (upcomingItem.paymentMethod !== 'any' && upcomingItem.paymentMethod !== paymentMethod) {
+      sound.playWarning();
+      return {
+        success: false,
+        error: `Admin restricted this withdrawal to ${
+          upcomingItem.paymentMethod === 'upi' ? 'UPI Instant' : 'Bank IMPS/NEFT'
+        }.`,
+      };
+    }
+
+    let paymentDetails: WithdrawalRequest['paymentDetails'];
+    if (paymentMethod === 'upi') {
+      const assignedUpi = currentUser.upiBeneficiaries.find(
+        (u) => u.id === beneficiaryId || u.upiId === beneficiaryId
+      );
+      if (!assignedUpi) {
+        sound.playWarning();
+        return {
+          success: false,
+          error:
+            'No Admin-assigned UPI beneficiary selected. Only Super Admin can add beneficiary accounts.',
+        };
+      }
+      paymentDetails = {
+        upiId: assignedUpi.upiId,
+        holderName: assignedUpi.holderName,
+      };
+    } else {
+      const assignedBank = currentUser.bankBeneficiaries.find((b) => b.id === beneficiaryId);
+      if (!assignedBank) {
+        sound.playWarning();
+        return {
+          success: false,
+          error:
+            'No Admin-assigned Bank beneficiary selected. Only Super Admin can add beneficiary accounts.',
+        };
+      }
+      paymentDetails = {
+        accountNumber: assignedBank.accountNumber,
+        ifscCode: assignedBank.ifscCode,
+        bankName: assignedBank.bankName,
+        holderName: assignedBank.accountHolderName,
+        accountType: assignedBank.accountType,
+      };
+    }
+
+    const amount = upcomingItem.withdrawalAmount;
+    const feeAmount = upcomingItem.withdrawalCharge;
+    const gstAmount = 0;
+    const netPayableAmount = upcomingItem.netAmount;
 
     if (amount > currentUser.availableBalance) {
       sound.playWarning();
@@ -1123,7 +1201,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
 
     if (currentUser.withdrawnToday + amount > currentUser.dailyWithdrawalLimit) {
-      const remainingLimit = currentUser.dailyWithdrawalLimit - currentUser.withdrawnToday;
+      const remainingLimit = Math.max(0, currentUser.dailyWithdrawalLimit - currentUser.withdrawnToday);
       sound.playWarning();
       return {
         success: false,
@@ -1131,13 +1209,11 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       };
     }
 
-    const { feeAmount, gstAmount, netPayableAmount } = calculateFee(amount);
-
     if (netPayableAmount <= 0) {
       sound.playWarning();
       return {
         success: false,
-        error: 'Net payable amount after applicable fees must be greater than ₹0.',
+        error: 'Net payable amount after withdrawal charge must be greater than ₹0.',
       };
     }
 
@@ -1161,6 +1237,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       paymentDetails,
       status: 'pending',
       referenceNumber: refNum,
+      upcomingWithdrawalId: upcomingItem.id,
       createdAt: nowIso,
       updatedAt: nowIso,
       statusTimeline: [
@@ -1168,7 +1245,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
           status: 'pending',
           timestamp: nowIso,
           title: 'Withdrawal Initiated',
-          description: `Withdrawal request for ₹${amount.toLocaleString('en-IN')} created via ${
+          description: `Withdrawal for "${upcomingItem.title}" (₹${amount.toLocaleString('en-IN')}, Charge ₹${feeAmount.toLocaleString('en-IN')}) created via ${
             paymentMethod === 'upi' ? 'UPI' : 'Bank Transfer'
           }.`,
           actor: currentUser.name.slice(0, 100),
@@ -1202,6 +1279,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
         paymentDetails,
         status: 'pending',
         referenceNumber: refNum,
+        upcomingWithdrawalId: upcomingItem.id,
         statusTimeline: newRequest.statusTimeline,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
@@ -2397,31 +2475,107 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return { success: true, user: newUser };
   };
 
-  // Add Beneficiaries
-  const addBankBeneficiary = (beneficiary: Omit<BankBeneficiary, 'id'>) => {
+  // Admin-Only: Add Beneficiaries to any User
+  const addBankBeneficiary = (userId: string, beneficiary: Omit<BankBeneficiary, 'id'>) => {
+    if (!isAdminAccount) {
+      sound.playWarning();
+      return { success: false, error: 'Only Super Admin can add bank beneficiary accounts.' };
+    }
+    const targetUser = users.find((u) => u.id === userId);
+    if (!targetUser) {
+      return { success: false, error: 'Target user account not found.' };
+    }
+    if (targetUser.bankBeneficiaries.length >= 10) {
+      return { success: false, error: 'Maximum of 10 bank beneficiaries allowed per user.' };
+    }
+
     sound.playSuccess();
+    const shouldBeDefault = Boolean(beneficiary.isDefault) || targetUser.bankBeneficiaries.length === 0;
     const newBeneficiary: BankBeneficiary = {
       ...beneficiary,
+      accountHolderName: beneficiary.accountHolderName.trim().slice(0, 100),
+      accountNumber: beneficiary.accountNumber.trim().slice(0, 40),
+      ifscCode: beneficiary.ifscCode.trim().toUpperCase().slice(0, 11),
+      bankName: beneficiary.bankName.trim().slice(0, 100),
+      branchName: beneficiary.branchName?.trim().slice(0, 120),
+      isDefault: shouldBeDefault,
       id: `bnk_${Date.now()}`,
     };
-    const updatedList = [newBeneficiary, ...currentUser.bankBeneficiaries].slice(0, 10);
-    updateDoc(doc(db, 'users', currentUser.id), {
+    const existingList = shouldBeDefault
+      ? targetUser.bankBeneficiaries.map((b) => ({ ...b, isDefault: false }))
+      : targetUser.bankBeneficiaries;
+    const updatedList = [newBeneficiary, ...existingList].slice(0, 10);
+
+    updateDoc(doc(db, 'users', userId), {
       bankBeneficiaries: updatedList,
       updatedAt: serverTimestamp(),
-    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `users/${currentUser.id}`));
+    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `users/${userId}`));
+
+    writeAdminLogDoc(
+      'ADD_BANK_BENEFICIARY',
+      `Admin assigned bank beneficiary ${newBeneficiary.bankName} (•••• ${newBeneficiary.accountNumber.slice(
+        -4
+      )}, IFSC ${newBeneficiary.ifscCode}) to user ${targetUser.name} (${userId}).`,
+      userId
+    );
+
+    writeNotificationDoc(
+      userId,
+      'Bank Beneficiary Added by Admin',
+      `Super Admin linked ${newBeneficiary.bankName} (•••• ${newBeneficiary.accountNumber.slice(-4)}) as a verified payout account on your profile.`,
+      'security'
+    );
+
+    return { success: true };
   };
 
-  const addUpiBeneficiary = (beneficiary: Omit<UpiBeneficiary, 'id'>) => {
+  const addUpiBeneficiary = (userId: string, beneficiary: Omit<UpiBeneficiary, 'id'>) => {
+    if (!isAdminAccount) {
+      sound.playWarning();
+      return { success: false, error: 'Only Super Admin can add UPI beneficiary accounts.' };
+    }
+    const targetUser = users.find((u) => u.id === userId);
+    if (!targetUser) {
+      return { success: false, error: 'Target user account not found.' };
+    }
+    if (targetUser.upiBeneficiaries.length >= 10) {
+      return { success: false, error: 'Maximum of 10 UPI beneficiaries allowed per user.' };
+    }
+
     sound.playSuccess();
+    const shouldBeDefault = Boolean(beneficiary.isDefault) || targetUser.upiBeneficiaries.length === 0;
     const newBeneficiary: UpiBeneficiary = {
       ...beneficiary,
+      upiId: beneficiary.upiId.trim().toLowerCase().slice(0, 100),
+      holderName: beneficiary.holderName.trim().slice(0, 100),
+      provider: beneficiary.provider.trim().slice(0, 60),
+      isDefault: shouldBeDefault,
       id: `upi_${Date.now()}`,
     };
-    const updatedList = [newBeneficiary, ...currentUser.upiBeneficiaries].slice(0, 10);
-    updateDoc(doc(db, 'users', currentUser.id), {
+    const existingList = shouldBeDefault
+      ? targetUser.upiBeneficiaries.map((u) => ({ ...u, isDefault: false }))
+      : targetUser.upiBeneficiaries;
+    const updatedList = [newBeneficiary, ...existingList].slice(0, 10);
+
+    updateDoc(doc(db, 'users', userId), {
       upiBeneficiaries: updatedList,
       updatedAt: serverTimestamp(),
-    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `users/${currentUser.id}`));
+    }).catch((err) => handleFirestoreError(err, OperationType.UPDATE, `users/${userId}`));
+
+    writeAdminLogDoc(
+      'ADD_UPI_BENEFICIARY',
+      `Admin assigned UPI beneficiary ${newBeneficiary.upiId} (${newBeneficiary.provider}) to user ${targetUser.name} (${userId}).`,
+      userId
+    );
+
+    writeNotificationDoc(
+      userId,
+      'UPI Beneficiary Added by Admin',
+      `Super Admin linked ${newBeneficiary.upiId} as a verified UPI payout account on your profile.`,
+      'security'
+    );
+
+    return { success: true };
   };
 
   const deletePayoutAccount = (
@@ -2476,7 +2630,7 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     writeNotificationDoc(
       userId,
       'Payout Account Removed',
-      `Your linked payout account (${deletedIdentifier}) was removed by Compliance/Admin. Reason: ${reason}. You can link a new verified account anytime.`,
+      `Your linked payout account (${deletedIdentifier}) was removed by Compliance/Admin. Reason: ${reason}. Only Super Admin can add or update beneficiary accounts on your profile.`,
       'security'
     );
 

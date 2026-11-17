@@ -586,6 +586,7 @@ function FintechAppCore() {
 
   // Global modals
   const [isWithdrawOpen, setIsWithdrawOpen] = useState(false);
+  const [preselectedUpcomingId, setPreselectedUpcomingId] = useState<string | null>(null);
   const [isBeneficiaryOpen, setIsBeneficiaryOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isApkOpen, setIsApkOpen] = useState(false);
@@ -644,7 +645,14 @@ function FintechAppCore() {
         ) : (
           <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
             <UserDashboard
-              onOpenWithdrawModal={() => setIsWithdrawOpen(true)}
+              onOpenWithdrawModal={() => {
+                setPreselectedUpcomingId(null);
+                setIsWithdrawOpen(true);
+              }}
+              onOpenWithdrawFromList={(upcomingId) => {
+                setPreselectedUpcomingId(upcomingId);
+                setIsWithdrawOpen(true);
+              }}
               onOpenBeneficiaryModal={() => setIsBeneficiaryOpen(true)}
               onSelectTransaction={(tx) => setSelectedTxn(tx)}
               onOpenReceipt={(tx) => setReceiptTxn(tx)}
@@ -656,7 +664,11 @@ function FintechAppCore() {
       {/* Shared Modals */}
       <WithdrawalModal
         isOpen={isWithdrawOpen}
-        onClose={() => setIsWithdrawOpen(false)}
+        preselectedUpcomingId={preselectedUpcomingId}
+        onClose={() => {
+          setIsWithdrawOpen(false);
+          setPreselectedUpcomingId(null);
+        }}
         onTransactionCreated={(txnId) => {
           handleSelectTxnId(txnId);
         }}

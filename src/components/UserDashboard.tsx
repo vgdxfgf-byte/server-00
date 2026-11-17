@@ -31,6 +31,7 @@ import { TransactionDetailsDrawer } from './TransactionDetailsDrawer';
 
 interface UserDashboardProps {
   onOpenWithdrawModal?: () => void;
+  onOpenWithdrawFromList?: (upcomingId: string) => void;
   onOpenBeneficiaryModal?: () => void;
   onSelectTransaction?: (tx: WithdrawalRequest) => void;
   onOpenReceipt?: (tx: WithdrawalRequest) => void;
@@ -38,6 +39,7 @@ interface UserDashboardProps {
 
 export const UserDashboard: React.FC<UserDashboardProps> = ({
   onOpenWithdrawModal,
+  onOpenWithdrawFromList,
   onOpenBeneficiaryModal,
   onSelectTransaction,
   onOpenReceipt,
@@ -47,6 +49,7 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
 
   // Internal modal states when not provided as props
   const [internalWithdrawOpen, setInternalWithdrawOpen] = useState(false);
+  const [internalPreselectedUpcomingId, setInternalPreselectedUpcomingId] = useState<string | null>(null);
   const [internalBeneficiaryOpen, setInternalBeneficiaryOpen] = useState(false);
   const [internalSelectedTx, setInternalSelectedTx] = useState<WithdrawalRequest | null>(null);
   const [internalReceiptTx, setInternalReceiptTx] = useState<WithdrawalRequest | null>(null);
@@ -56,6 +59,17 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
       onOpenWithdrawModal();
     } else {
       sound.playClick();
+      setInternalPreselectedUpcomingId(null);
+      setInternalWithdrawOpen(true);
+    }
+  };
+
+  const handleWithdrawFromListClick = (upcomingId: string) => {
+    if (onOpenWithdrawFromList) {
+      onOpenWithdrawFromList(upcomingId);
+    } else {
+      sound.playClick();
+      setInternalPreselectedUpcomingId(upcomingId);
       setInternalWithdrawOpen(true);
     }
   };
@@ -383,11 +397,11 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                 onClick={handleBeneficiaryClick}
                 className="text-xs font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
               >
-                Manage
+                View
               </button>
             </div>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              {currentUser.bankBeneficiaries.length} Banks · {currentUser.upiBeneficiaries.length} UPI VPAs
+              {currentUser.bankBeneficiaries.length} Banks · {currentUser.upiBeneficiaries.length} UPI VPAs (Admin Assigned)
             </p>
           </div>
 
@@ -624,6 +638,15 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                   ? 'Cancelled'
                   : 'Upcoming';
 
+              const existingTx = userWithdrawals.find(
+                (w) =>
+                  w.upcomingWithdrawalId === item.id &&
+                  w.status !== 'rejected' &&
+                  w.status !== 'failed'
+              );
+              const isEligibleToWithdraw =
+                (item.status === 'upcoming' || item.status === 'ready') && !existingTx;
+
               return (
                 <div
                   key={item.id}
@@ -686,6 +709,33 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
                       <span className="break-words">{item.note}</span>
                     </div>
                   )}
+
+                  <div className="pt-2 border-t border-slate-200/70 dark:border-slate-800 flex items-center justify-between gap-2">
+                    {existingTx ? (
+                      <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-blue-600 dark:text-blue-400 font-mono">
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                        <span>Submitted ({existingTx.id})</span>
+                      </span>
+                    ) : isEligibleToWithdraw ? (
+                      <>
+                        <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                          Ready for authorized withdrawal
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleWithdrawFromListClick(item.id)}
+                          className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold transition-colors cursor-pointer inline-flex items-center gap-1"
+                        >
+                          <ArrowUpRight className="w-3.5 h-3.5" />
+                          <span>Withdraw Now</span>
+                        </button>
+                      </>
+                    ) : (
+                      <span className="text-[11px] text-slate-400 italic">
+                        {item.status === 'completed' ? 'Payout closed' : 'Cancelled by Admin'}
+                      </span>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -910,7 +960,11 @@ export const UserDashboard: React.FC<UserDashboardProps> = ({
       {/* Self-contained modals when invoked directly */}
       <WithdrawalModal
         isOpen={internalWithdrawOpen}
-        onClose={() => setInternalWithdrawOpen(false)}
+        preselectedUpcomingId={internalPreselectedUpcomingId}
+        onClose={() => {
+          setInternalWithdrawOpen(false);
+          setInternalPreselectedUpcomingId(null);
+        }}
       />
       <BeneficiaryModal
         isOpen={internalBeneficiaryOpen}

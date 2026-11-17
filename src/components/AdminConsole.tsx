@@ -3,6 +3,7 @@ import { useFintech } from '../context/FintechContext';
 import { AdminSection, AdminSidebar } from './AdminSidebar';
 import { AnalyticsCharts } from './AnalyticsCharts';
 import { sound } from '../utils/audio';
+import { lookupIfsc } from '../utils/bankLookup';
 import {
   Shield,
   Wallet,
@@ -63,6 +64,8 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
     updateFeeConfig,
     toggleWithdrawalsEnabled,
     toggleUserFrozenState,
+    addBankBeneficiary,
+    addUpiBeneficiary,
     deletePayoutAccount,
     deleteTransaction,
     deleteUser,
@@ -102,6 +105,25 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
   } | null>(null);
   const [deletePayoutReason, setDeletePayoutReason] = useState('Regulatory KYC audit or fraudulent account flag');
   const [payoutDeleteSuccess, setPayoutDeleteSuccess] = useState<string | null>(null);
+
+  // Add Bank / UPI Beneficiary Modals (Admin-only)
+  const [addingBankForUser, setAddingBankForUser] = useState<User | null>(null);
+  const [adminBankHolder, setAdminBankHolder] = useState('');
+  const [adminBankAccountNumber, setAdminBankAccountNumber] = useState('');
+  const [adminBankIfsc, setAdminBankIfsc] = useState('');
+  const [adminBankName, setAdminBankName] = useState('');
+  const [adminBankBranch, setAdminBankBranch] = useState('');
+  const [adminBankType, setAdminBankType] = useState<'savings' | 'current'>('savings');
+  const [adminBankIsDefault, setAdminBankIsDefault] = useState(true);
+  const [adminBankLookupBusy, setAdminBankLookupBusy] = useState(false);
+  const [adminBankError, setAdminBankError] = useState('');
+
+  const [addingUpiForUser, setAddingUpiForUser] = useState<User | null>(null);
+  const [adminUpiId, setAdminUpiId] = useState('');
+  const [adminUpiHolder, setAdminUpiHolder] = useState('');
+  const [adminUpiProvider, setAdminUpiProvider] = useState('Google Pay / HDFC');
+  const [adminUpiIsDefault, setAdminUpiIsDefault] = useState(true);
+  const [adminUpiError, setAdminUpiError] = useState('');
 
   // Delete Withdrawal History Record Modal State
   const [deletingWithdrawHistory, setDeletingWithdrawHistory] = useState<WithdrawalRequest | null>(null);
@@ -172,6 +194,25 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
       setSelectedUserId(users[0].id);
     }
   }, [users, selectedUserId]);
+
+  React.useEffect(() => {
+    if (!addingBankForUser) return;
+    const clean = adminBankIfsc.trim().toUpperCase();
+    if (clean.length === 11) {
+      setAdminBankLookupBusy(true);
+      lookupIfsc(clean)
+        .then((res) => {
+          if (res) {
+            setAdminBankName(res.bankName);
+            setAdminBankBranch(res.branchName);
+          }
+          setAdminBankLookupBusy(false);
+        })
+        .catch(() => {
+          setAdminBankLookupBusy(false);
+        });
+    }
+  }, [adminBankIfsc, addingBankForUser]);
 
   React.useEffect(() => {
     setFeeForm({
@@ -298,6 +339,103 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
       setDeletingPayoutAccount(null);
       setTimeout(() => setPayoutDeleteSuccess(null), 4000);
     }
+  };
+
+  const openAddBankModal = (targetUser: User) => {
+    sound.playClick();
+    setAddingBankForUser(targetUser);
+    setAdminBankHolder(targetUser.name);
+    setAdminBankAccountNumber('');
+    setAdminBankIfsc('');
+    setAdminBankName('');
+    setAdminBankBranch('');
+    setAdminBankType('savings');
+    setAdminBankIsDefault(targetUser.bankBeneficiaries.length === 0);
+    setAdminBankError('');
+  };
+
+  const handleAddBankSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addingBankForUser) return;
+    setAdminBankError('');
+
+    const cleanAcct = adminBankAccountNumber.trim();
+    const cleanIfsc = adminBankIfsc.trim().toUpperCase();
+    if (!adminBankHolder.trim()) {
+      setAdminBankError('Account holder name is required.');
+      return;
+    }
+    if (cleanAcct.length < 8) {
+      setAdminBankError('Bank account number must be at least 8 characters.');
+      return;
+    }
+    if (cleanIfsc.length !== 11) {
+      setAdminBankError('IFSC code must be exactly 11 characters.');
+      return;
+    }
+
+    const res = addBankBeneficiary(addingBankForUser.id, {
+      accountHolderName: adminBankHolder.trim(),
+      accountNumber: cleanAcct,
+      ifscCode: cleanIfsc,
+      bankName: adminBankName.trim() || 'Verified Bank Ltd',
+      branchName: adminBankBranch.trim() || 'Core Branch',
+      accountType: adminBankType,
+      isDefault: adminBankIsDefault,
+    });
+
+    if (!res.success) {
+      setAdminBankError(res.error || 'Failed to add bank beneficiary.');
+      return;
+    }
+
+    setPayoutDeleteSuccess(
+      `Added Bank beneficiary (${adminBankName.trim() || 'Verified Bank'} •••• ${cleanAcct.slice(-4)}) for ${addingBankForUser.name}.`
+    );
+    setAddingBankForUser(null);
+    setTimeout(() => setPayoutDeleteSuccess(null), 4000);
+  };
+
+  const openAddUpiModal = (targetUser: User) => {
+    sound.playClick();
+    setAddingUpiForUser(targetUser);
+    setAdminUpiId('');
+    setAdminUpiHolder(targetUser.name);
+    setAdminUpiProvider('Google Pay / HDFC');
+    setAdminUpiIsDefault(targetUser.upiBeneficiaries.length === 0);
+    setAdminUpiError('');
+  };
+
+  const handleAddUpiSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addingUpiForUser) return;
+    setAdminUpiError('');
+
+    const cleanUpi = adminUpiId.trim().toLowerCase();
+    if (!cleanUpi.includes('@') || cleanUpi.length < 5) {
+      setAdminUpiError('Enter a valid UPI VPA including "@" (e.g. user@okhdfcbank).');
+      return;
+    }
+    if (!adminUpiHolder.trim()) {
+      setAdminUpiError('Account holder name is required.');
+      return;
+    }
+
+    const res = addUpiBeneficiary(addingUpiForUser.id, {
+      upiId: cleanUpi,
+      holderName: adminUpiHolder.trim(),
+      provider: adminUpiProvider,
+      isDefault: adminUpiIsDefault,
+    });
+
+    if (!res.success) {
+      setAdminUpiError(res.error || 'Failed to add UPI beneficiary.');
+      return;
+    }
+
+    setPayoutDeleteSuccess(`Added UPI beneficiary (${cleanUpi}) for ${addingUpiForUser.name}.`);
+    setAddingUpiForUser(null);
+    setTimeout(() => setPayoutDeleteSuccess(null), 4000);
   };
 
   const handleDeleteWithdrawHistorySubmit = (e: React.FormEvent) => {
@@ -1262,7 +1400,7 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                   )}
                 </div>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
-                  Publish scheduled withdrawal items with exact withdrawal amount &amp; withdrawal charge directly to users.
+                  Publish withdrawal items with exact amount &amp; charge. Users can only withdraw items published in this Withdrawal List.
                 </p>
 
                 {upcomingFeedback && (
@@ -1597,10 +1735,10 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-xs space-y-4">
             <div>
               <h3 className="font-bold text-slate-900 dark:text-white text-base mb-1">
-                User Directory & Linked Payout Accounts
+                User Directory &amp; Admin-Assigned Beneficiary Accounts
               </h3>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                View registered user details, manage KYC statuses, freeze/unfreeze accounts, and audit/delete user bank accounts or UPI VPAs.
+                Only Super Admin can add bank or UPI beneficiary accounts to users. Manage KYC statuses, freeze/unfreeze accounts, and assign or remove payout accounts.
               </p>
             </div>
 
@@ -1736,6 +1874,14 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                             <Building2 className="w-3.5 h-3.5 text-blue-500" />
                             <span>Linked Bank Accounts ({u.bankBeneficiaries.length})</span>
                           </span>
+                          <button
+                            type="button"
+                            onClick={() => openAddBankModal(u)}
+                            className="px-2 py-1 rounded-lg bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-950/80 text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Plus className="w-3 h-3" />
+                            <span>Add Bank</span>
+                          </button>
                         </div>
 
                         {u.bankBeneficiaries.length === 0 ? (
@@ -1794,6 +1940,14 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                             <Smartphone className="w-3.5 h-3.5 text-emerald-500" />
                             <span>Linked UPI VPAs ({u.upiBeneficiaries.length})</span>
                           </span>
+                          <button
+                            type="button"
+                            onClick={() => openAddUpiModal(u)}
+                            className="px-2 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-950/80 text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Plus className="w-3 h-3" />
+                            <span>Add UPI</span>
+                          </button>
                         </div>
 
                         {u.upiBeneficiaries.length === 0 ? (
@@ -2919,6 +3073,244 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                     Save Pending Fund Note
                   </button>
                 </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin-Only: Add Bank Beneficiary Modal */}
+      {addingBankForUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-md w-full shadow-2xl">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-9 h-9 rounded-xl bg-blue-100 dark:bg-blue-950/60 flex items-center justify-center">
+                <Building2 className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-900 dark:text-white text-base">
+                  Add Bank Beneficiary (Admin)
+                </h3>
+                <p className="text-[11px] text-slate-400">
+                  Assign verified bank payout account to <strong className="text-slate-700 dark:text-slate-200">{addingBankForUser.name}</strong>
+                </p>
+              </div>
+            </div>
+
+            {adminBankError && (
+              <div className="mt-3 p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800/60 text-xs text-rose-700 dark:text-rose-300">
+                {adminBankError}
+              </div>
+            )}
+
+            <form onSubmit={handleAddBankSubmit} className="mt-4 space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                  Account Holder Name
+                </label>
+                <input
+                  type="text"
+                  required
+                  maxLength={100}
+                  value={adminBankHolder}
+                  onChange={(e) => setAdminBankHolder(e.target.value)}
+                  className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                    Account Number
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={40}
+                    value={adminBankAccountNumber}
+                    onChange={(e) => setAdminBankAccountNumber(e.target.value)}
+                    placeholder="e.g. 50100482910482"
+                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                    11-Digit IFSC Code
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={11}
+                    value={adminBankIfsc}
+                    onChange={(e) => setAdminBankIfsc(e.target.value.toUpperCase())}
+                    placeholder="e.g. HDFC0000060"
+                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono uppercase"
+                  />
+                </div>
+              </div>
+
+              {adminBankLookupBusy && (
+                <p className="text-[11px] text-blue-600 dark:text-blue-400 flex items-center gap-1">
+                  <RotateCw className="w-3 h-3 animate-spin" />
+                  <span>Verifying IFSC branch...</span>
+                </p>
+              )}
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                    Bank Name
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={100}
+                    value={adminBankName}
+                    onChange={(e) => setAdminBankName(e.target.value)}
+                    placeholder="e.g. HDFC Bank"
+                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                    Account Type
+                  </label>
+                  <select
+                    value={adminBankType}
+                    onChange={(e) => setAdminBankType(e.target.value as 'savings' | 'current')}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-medium"
+                  >
+                    <option value="savings">Savings</option>
+                    <option value="current">Current</option>
+                  </select>
+                </div>
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={adminBankIsDefault}
+                  onChange={(e) => setAdminBankIsDefault(e.target.checked)}
+                  className="rounded text-blue-600 focus:ring-blue-500"
+                />
+                <span>Set as user&apos;s default bank account</span>
+              </label>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAddingBankForUser(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white cursor-pointer shadow-sm"
+                >
+                  Assign Bank Beneficiary
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin-Only: Add UPI Beneficiary Modal */}
+      {addingUpiForUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-md w-full shadow-2xl">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-9 h-9 rounded-xl bg-emerald-100 dark:bg-emerald-950/60 flex items-center justify-center">
+                <Smartphone className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-900 dark:text-white text-base">
+                  Add UPI Beneficiary (Admin)
+                </h3>
+                <p className="text-[11px] text-slate-400">
+                  Assign verified UPI VPA to <strong className="text-slate-700 dark:text-slate-200">{addingUpiForUser.name}</strong>
+                </p>
+              </div>
+            </div>
+
+            {adminUpiError && (
+              <div className="mt-3 p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800/60 text-xs text-rose-700 dark:text-rose-300">
+                {adminUpiError}
+              </div>
+            )}
+
+            <form onSubmit={handleAddUpiSubmit} className="mt-4 space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                  UPI VPA / Handle
+                </label>
+                <input
+                  type="text"
+                  required
+                  maxLength={100}
+                  value={adminUpiId}
+                  onChange={(e) => setAdminUpiId(e.target.value)}
+                  placeholder="e.g. username@okhdfcbank"
+                  className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                  Account Holder Name
+                </label>
+                <input
+                  type="text"
+                  required
+                  maxLength={100}
+                  value={adminUpiHolder}
+                  onChange={(e) => setAdminUpiHolder(e.target.value)}
+                  className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                  UPI Provider
+                </label>
+                <select
+                  value={adminUpiProvider}
+                  onChange={(e) => setAdminUpiProvider(e.target.value)}
+                  className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-medium"
+                >
+                  <option value="Google Pay / HDFC">Google Pay</option>
+                  <option value="PhonePe / Yes Bank">PhonePe</option>
+                  <option value="Paytm Payments Bank">Paytm</option>
+                  <option value="BHIM / NPCI">BHIM UPI</option>
+                  <option value="ICICI / SBI YONO">Bank Native UPI</option>
+                </select>
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={adminUpiIsDefault}
+                  onChange={(e) => setAdminUpiIsDefault(e.target.checked)}
+                  className="rounded text-emerald-600 focus:ring-emerald-500"
+                />
+                <span>Set as user&apos;s default UPI handle</span>
+              </label>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAddingUpiForUser(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer shadow-sm"
+                >
+                  Assign UPI Beneficiary
+                </button>
               </div>
             </form>
           </div>

@@ -87,6 +87,7 @@ export interface WithdrawalRequest {
   updatedAt: string;
   completedAt?: string;
   referenceNumber: string;
+  upcomingWithdrawalId?: string;
 }
 
 export interface DepositTransaction {
