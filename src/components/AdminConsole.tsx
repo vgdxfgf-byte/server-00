@@ -86,9 +86,10 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
   const [notifyPendingNote, setNotifyPendingNote] = useState(true);
   const [noteSaveFeedback, setNoteSaveFeedback] = useState<string | null>(null);
 
-  // Rejection Modal State
+  // Rejection / Cancel & Refund Modal State
   const [rejectingTxn, setRejectingTxn] = useState<WithdrawalRequest | null>(null);
   const [rejectionReason, setRejectionReason] = useState('Account name mismatch or regulatory compliance review failure');
+  const [rejectAdminNote, setRejectAdminNote] = useState('');
 
   // Delete Payout Account Modal State
   const [deletingPayoutAccount, setDeletingPayoutAccount] = useState<{
@@ -276,8 +277,9 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
   const handleRejectSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!rejectingTxn) return;
-    adminRejectRequest(rejectingTxn.id, rejectionReason);
+    adminRejectRequest(rejectingTxn.id, rejectionReason, rejectAdminNote);
     setRejectingTxn(null);
+    setRejectAdminNote('');
   };
 
   const handleDeletePayoutSubmit = (e: React.FormEvent) => {
@@ -742,6 +744,7 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                             onClick={() => {
                               setRejectingTxn(w);
                               setRejectionReason('Regulatory compliance review failure or name mismatch.');
+                              setRejectAdminNote(w.adminNote || '');
                             }}
                             className="px-2.5 py-1 rounded bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 hover:bg-rose-100 font-semibold text-xs transition cursor-pointer"
                           >
@@ -915,15 +918,29 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                             <MessageSquare className="w-3 h-3" />
                             <span>{w.adminNote ? 'Edit Note' : 'Note'}</span>
                           </button>
-                          {w.status !== 'completed' && w.status !== 'rejected' && (
+                          {w.status !== 'rejected' && w.status !== 'failed' && (
                             <button
                               onClick={() => {
                                 setRejectingTxn(w);
-                                setRejectionReason('Compliance failure or regulatory check rejected.');
+                                setRejectionReason(
+                                  w.status === 'completed'
+                                    ? 'Completed payout cancelled & refunded by Super Admin.'
+                                    : 'Compliance failure or regulatory check rejected.'
+                                );
+                                setRejectAdminNote(w.adminNote || '');
                               }}
-                              className="px-2 py-1 rounded bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300 font-semibold text-[11px] cursor-pointer"
+                              className={`px-2 py-1 rounded font-semibold text-[11px] cursor-pointer ${
+                                w.status === 'completed'
+                                  ? 'bg-amber-100 hover:bg-amber-200 text-amber-800 dark:bg-amber-950/70 dark:hover:bg-amber-900/70 dark:text-amber-300'
+                                  : 'bg-rose-100 hover:bg-rose-200 text-rose-700 dark:bg-rose-950 dark:hover:bg-rose-900/70 dark:text-rose-300'
+                              }`}
+                              title={
+                                w.status === 'completed'
+                                  ? 'Cancel completed withdrawal, refund balance, and add note'
+                                  : 'Reject withdrawal and refund balance'
+                              }
                             >
-                              Reject
+                              {w.status === 'completed' ? 'Cancel & Refund' : 'Reject'}
                             </button>
                           )}
                           <button
@@ -2319,20 +2336,29 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
         </div>
       )}
 
-      {/* Reject Modal */}
+      {/* Reject / Cancel & Refund Modal */}
       {rejectingTxn && (() => {
         const { refundFeeAmount, netRefundAmount } = calculateRefundFee(rejectingTxn.amount);
+        const isCompletedReversal = rejectingTxn.status === 'completed';
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs">
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-md w-full shadow-2xl">
-              <h3 className="font-bold text-slate-900 dark:text-white text-lg">Reject &amp; Refund Withdrawal</h3>
+              <h3 className="font-bold text-slate-900 dark:text-white text-lg">
+                {isCompletedReversal
+                  ? 'Cancel & Refund Completed Withdrawal'
+                  : 'Reject & Refund Withdrawal'}
+              </h3>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                Rejecting applies the Admin-configured Refund Fee policy before crediting {rejectingTxn.userName}&apos;s wallet.
+                {isCompletedReversal
+                  ? `Cancelling this completed payout (${rejectingTxn.id}) reverses total withdrawn volume and credits the refund back to ${rejectingTxn.userName}'s wallet.`
+                  : `Rejecting applies the Admin-configured Refund Fee policy before crediting ${rejectingTxn.userName}'s wallet.`}
               </p>
 
               <div className="mt-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 text-xs space-y-1.5">
                 <div className="flex justify-between">
-                  <span className="text-slate-500 dark:text-slate-400">Requested Withdrawal:</span>
+                  <span className="text-slate-500 dark:text-slate-400">
+                    {isCompletedReversal ? 'Settled Withdrawal:' : 'Requested Withdrawal:'}
+                  </span>
                   <span className="font-mono font-semibold text-slate-900 dark:text-white">
                     ₹{rejectingTxn.amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                   </span>
@@ -2354,10 +2380,11 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
               <form onSubmit={handleRejectSubmit} className="mt-4 space-y-4">
                 <div>
                   <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
-                    Rejection Reason (Audit record)
+                    {isCompletedReversal ? 'Cancellation & Refund Reason (Audit record)' : 'Rejection Reason (Audit record)'}
                   </label>
                   <textarea
-                    rows={3}
+                    rows={2}
+                    maxLength={500}
                     value={rejectionReason}
                     onChange={(e) => setRejectionReason(e.target.value)}
                     className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs focus:ring-1 focus:ring-rose-500"
@@ -2365,19 +2392,45 @@ export const AdminConsole: React.FC<{ onExitAdmin: () => void }> = ({ onExitAdmi
                   />
                 </div>
 
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                    Admin Message Note (Optional · Visible to User)
+                  </label>
+                  <textarea
+                    rows={2}
+                    maxLength={500}
+                    placeholder="Add a clear note for the user about this refund or cancellation..."
+                    value={rejectAdminNote}
+                    onChange={(e) => setRejectAdminNote(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs focus:ring-1 focus:ring-blue-500"
+                  />
+                  <div className="text-[10px] text-slate-400 mt-1 text-right">
+                    {rejectAdminNote.length}/500
+                  </div>
+                </div>
+
                 <div className="flex items-center justify-end gap-2">
                   <button
                     type="button"
-                    onClick={() => setRejectingTxn(null)}
+                    onClick={() => {
+                      setRejectingTxn(null);
+                      setRejectAdminNote('');
+                    }}
                     className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
                   >
-                    Cancel
+                    Close
                   </button>
                   <button
                     type="submit"
-                    className="px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white cursor-pointer shadow-sm"
+                    className={`px-4 py-2 rounded-xl text-xs font-bold text-white cursor-pointer shadow-sm ${
+                      isCompletedReversal
+                        ? 'bg-amber-600 hover:bg-amber-500'
+                        : 'bg-rose-600 hover:bg-rose-500'
+                    }`}
                   >
-                    Confirm Rejection &amp; Refund
+                    {isCompletedReversal
+                      ? 'Confirm Cancel & Refund'
+                      : 'Confirm Rejection & Refund'}
                   </button>
                 </div>
               </form>

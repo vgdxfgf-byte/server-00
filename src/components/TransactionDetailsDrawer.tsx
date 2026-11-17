@@ -88,7 +88,11 @@ export const TransactionDetailsDrawer: React.FC<TransactionDetailsDrawerProps> =
             {transaction.rejectionReason && (
               <div className="mt-4 p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 rounded-xl text-left">
                 <span className="text-xs font-semibold text-rose-700 dark:text-rose-400 block mb-1">
-                  Rejection Reason & Action
+                  {transaction.statusTimeline?.some(
+                    (item) => item.title === 'Completed Withdrawal Cancelled & Refunded'
+                  )
+                    ? 'Cancellation & Refund Reason'
+                    : 'Rejection Reason & Action'}
                 </span>
                 <p className="text-xs text-rose-600 dark:text-rose-300">
                   {transaction.rejectionReason}

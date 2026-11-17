@@ -44,13 +44,17 @@ export const TransactionReceiptModal: React.FC<TransactionReceiptModalProps> = (
             <span>PROCESSING IN BANKING RAIL</span>
           </div>
         );
-      case 'rejected':
+      case 'rejected': {
+        const isCancelledCompleted = transaction.statusTimeline?.some(
+          (item) => item.title === 'Completed Withdrawal Cancelled & Refunded'
+        );
         return (
           <div className="flex items-center gap-1.5 text-rose-600 dark:text-rose-400 font-semibold text-sm">
             <AlertCircle className="w-4 h-4" />
-            <span>REJECTED & REFUNDED</span>
+            <span>{isCancelledCompleted ? 'CANCELLED & REFUNDED' : 'REJECTED & REFUNDED'}</span>
           </div>
         );
+      }
       default:
         return (
           <div className="flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-semibold text-sm">

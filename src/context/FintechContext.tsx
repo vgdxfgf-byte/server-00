@@ -116,7 +116,7 @@ interface FintechContextType {
   adminApproveRequest: (requestId: string) => void;
   adminMarkProcessing: (requestId: string, utrNumber?: string) => void;
   adminMarkCompleted: (requestId: string, utrNumber: string, adminNote?: string) => void;
-  adminRejectRequest: (requestId: string, reason: string) => void;
+  adminRejectRequest: (requestId: string, reason: string, adminNote?: string) => void;
   updateWithdrawalAdminNote: (
     requestId: string,
     note: string,
@@ -1447,13 +1447,18 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
     );
   };
 
-  // SUPER ADMIN ACTION 4: Reject Request (Reverses funds back to available balance minus Admin Refund Fee)
-  const adminRejectRequest = (requestId: string, reason: string) => {
+  // SUPER ADMIN ACTION 4: Reject or Cancel & Refund Request (Supports pending/approved/processing AND completed withdrawals)
+  const adminRejectRequest = (requestId: string, reason: string, adminNote?: string) => {
     const targetReq = withdrawals.find((r) => r.id === requestId);
-    if (!targetReq) return;
+    if (!targetReq || targetReq.status === 'rejected' || targetReq.status === 'failed') return;
     sound.playWarning();
+    const wasCompleted = targetReq.status === 'completed';
     const nowIso = new Date().toISOString();
-    const cleanReason = reason.slice(0, 500);
+    const cleanReason = (
+      reason.trim() ||
+      (wasCompleted ? 'Completed withdrawal cancelled & refunded by Admin' : 'Rejected by Admin')
+    ).slice(0, 500);
+    const cleanNote = adminNote !== undefined ? adminNote.trim().slice(0, 500) : undefined;
     const { refundFeeAmount, netRefundAmount } = calculateRefundFee(targetReq.amount);
 
     const feeNote =
@@ -1472,65 +1477,94 @@ export const FintechProvider: React.FC<{ children: React.ReactNode }> = ({ child
       {
         status: 'rejected' as const,
         timestamp: nowIso,
-        title: 'Withdrawal Rejected & Refunded',
-        description: `Reason: ${cleanReason}. ${feeNote}`,
+        title: wasCompleted
+          ? 'Completed Withdrawal Cancelled & Refunded'
+          : 'Withdrawal Rejected & Refunded',
+        description: `Reason: ${cleanReason}. ${feeNote}${cleanNote ? ` Admin Note: ${cleanNote}` : ''}`,
         actor: 'Super Admin / Compliance',
       },
     ].slice(0, 20);
 
     const targetUser = users.find((u) => u.id === targetReq.userId);
     const batch = writeBatch(db);
-    batch.update(doc(db, 'withdrawals', requestId), {
+    const withdrawalUpdates: Record<string, unknown> = {
       status: 'rejected',
       rejectionReason: cleanReason,
       refundFeeAmount,
       refundedAmount: netRefundAmount,
       statusTimeline: nextTimeline,
       updatedAt: serverTimestamp(),
-    });
+    };
+    if (cleanNote !== undefined) {
+      withdrawalUpdates.adminNote = cleanNote ? cleanNote : deleteField();
+    }
+    batch.update(doc(db, 'withdrawals', requestId), withdrawalUpdates);
+
     if (targetUser) {
-      batch.update(doc(db, 'users', targetUser.id), {
+      const isSameDay =
+        new Date(targetReq.createdAt).toDateString() === new Date().toDateString();
+      const userUpdates: Record<string, unknown> = {
         availableBalance: Math.round((targetUser.availableBalance + netRefundAmount) * 100) / 100,
-        pendingWithdrawals: Math.max(
+        updatedAt: serverTimestamp(),
+      };
+      if (wasCompleted) {
+        userUpdates.totalWithdrawn = Math.max(
+          0,
+          Math.round((targetUser.totalWithdrawn - targetReq.amount) * 100) / 100
+        );
+      } else {
+        userUpdates.pendingWithdrawals = Math.max(
           0,
           Math.round((targetUser.pendingWithdrawals - targetReq.amount) * 100) / 100
-        ),
-        withdrawnToday: Math.max(
+        );
+      }
+      if (isSameDay) {
+        userUpdates.withdrawnToday = Math.max(
           0,
           Math.round((targetUser.withdrawnToday - targetReq.amount) * 100) / 100
-        ),
-        updatedAt: serverTimestamp(),
-      });
+        );
+      }
+      batch.update(doc(db, 'users', targetUser.id), userUpdates);
     }
     batch
       .commit()
       .catch((err) => handleFirestoreError(err, OperationType.WRITE, `withdrawals/${requestId}`));
 
+    const actionWord = wasCompleted ? 'cancelled & refunded' : 'rejected';
+    const notifTitle = wasCompleted
+      ? 'Completed Withdrawal Cancelled & Refunded'
+      : 'Withdrawal Rejected & Refunded';
+    const noteSuffix = cleanNote ? ` Note: "${cleanNote}"` : '';
+
     writeNotificationDoc(
       targetReq.userId,
-      'Withdrawal Rejected & Refunded',
+      notifTitle,
       refundFeeAmount > 0
-        ? `Your request ${targetReq.id} for ₹${targetReq.amount.toLocaleString(
+        ? `Your withdrawal ${targetReq.id} for ₹${targetReq.amount.toLocaleString(
             'en-IN'
-          )} was rejected (${cleanReason}). After a ₹${refundFeeAmount.toLocaleString(
+          )} was ${actionWord} (${cleanReason}). After a ₹${refundFeeAmount.toLocaleString(
             'en-IN'
-          )} refund fee, ₹${netRefundAmount.toLocaleString('en-IN')} has been refunded to your wallet.`
-        : `Your request ${targetReq.id} for ₹${targetReq.amount.toLocaleString(
+          )} refund fee, ₹${netRefundAmount.toLocaleString(
             'en-IN'
-          )} was rejected (${cleanReason}). The full ₹${netRefundAmount.toLocaleString(
+          )} has been refunded to your wallet.${noteSuffix}`
+        : `Your withdrawal ${targetReq.id} for ₹${targetReq.amount.toLocaleString(
             'en-IN'
-          )} has been refunded to your wallet.`,
+          )} was ${actionWord} (${cleanReason}). The full ₹${netRefundAmount.toLocaleString(
+            'en-IN'
+          )} has been refunded to your wallet.${noteSuffix}`,
       'withdrawal',
       targetReq.id
     );
 
     writeAdminLogDoc(
-      'REJECT_WITHDRAWAL',
-      `Rejected withdrawal of ₹${targetReq.amount.toLocaleString(
+      wasCompleted ? 'CANCEL_REFUND_COMPLETED_WITHDRAWAL' : 'REJECT_WITHDRAWAL',
+      `${wasCompleted ? 'Cancelled & refunded completed' : 'Rejected'} withdrawal of ₹${targetReq.amount.toLocaleString(
         'en-IN'
       )}. Reason: "${cleanReason}". Refund fee: ₹${refundFeeAmount.toLocaleString(
         'en-IN'
-      )}; Net refunded: ₹${netRefundAmount.toLocaleString('en-IN')}.`,
+      )}; Net refunded: ₹${netRefundAmount.toLocaleString('en-IN')}.${
+        cleanNote ? ` Admin Note: "${cleanNote}"` : ''
+      }`,
       requestId
     );
   };
